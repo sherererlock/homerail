@@ -6,7 +6,7 @@ import * as net from "node:net";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn, spawnSync, type SpawnOptions } from "node:child_process";
 import { HomeRailClient } from "../client.js";
 import type { BaseResponse } from "../client.js";
 import {
@@ -475,7 +475,7 @@ async function startRuntime(globalOpts: GlobalOpts, opts: StartOpts): Promise<nu
   const shouldBuildImage = opts.buildWorkerImage === false ? false : cfg.runtime?.buildWorkerImage !== false;
   if (shouldBuildImage) {
     try {
-      ensureWorkerImage(Boolean(opts.rebuildWorkerImage));
+      await ensureWorkerImage(Boolean(opts.rebuildWorkerImage));
     } catch (err) {
       writeWorkerImageRuntimeStatus("error", {
         error: err instanceof Error ? err.message : String(err),
@@ -619,7 +619,9 @@ function startService(name: RuntimeServiceName, relativeScript: string, env: Rec
       ...env,
     },
     detached: true,
+    shell: false,
     stdio: ["ignore", out, err],
+    windowsHide: true,
   });
   child.unref();
   if (!child.pid) throw new Error(`failed to start ${name}`);
@@ -724,6 +726,13 @@ interface UiCertificate {
   certPath: string;
 }
 
+export function agentUiDevServerCommand(agentUiDir: string): { command: string; args: string[] } {
+  return {
+    command: process.execPath,
+    args: [path.join(agentUiDir, "node_modules", "vite", "bin", "vite.js")],
+  };
+}
+
 function startUiProcess(opts: StartUiProcessOpts): number {
   const agentUiDir = path.join(resolveRepoRoot(), "agent-ui");
   const out = fs.openSync(logPath(opts.name), "a");
@@ -732,8 +741,7 @@ function startUiProcess(opts: StartUiProcessOpts): number {
   // Production / packaged mode: serve the prebuilt agent-ui/dist with a tiny
   // zero-dependency static server (see static-ui-server.ts), avoiding the need
   // to ship agent-ui's full node_modules (vite toolchain). On Windows this is
-  // also the most reliable source-deploy path when dist exists, because
-  // detached npm.cmd spawning can fail before Vite starts.
+  // also the most reliable source-deploy path when dist exists.
   const serveStatic = shouldServeStaticAgentUi(agentUiDir);
 
   let child: import("child_process").ChildProcess;
@@ -761,13 +769,14 @@ function startUiProcess(opts: StartUiProcessOpts): number {
           : {}),
       },
       detached: true,
+      shell: false,
       stdio: ["ignore", out, err],
+      windowsHide: true,
     });
   } else {
-    child = spawn(npmExecutable(), [
-      "run",
-      "dev",
-      "--",
+    const devServer = agentUiDevServerCommand(agentUiDir);
+    child = spawn(devServer.command, [
+      ...devServer.args,
       "--host",
       opts.host,
       "--port",
@@ -793,7 +802,9 @@ function startUiProcess(opts: StartUiProcessOpts): number {
           : {}),
       },
       detached: true,
+      shell: false,
       stdio: ["ignore", out, err],
+      windowsHide: true,
     });
   }
   child.unref();
@@ -925,10 +936,6 @@ export function shouldServeStaticAgentUi(
   return hasDist && !fs.existsSync(path.join(agentUiDir, "node_modules"));
 }
 
-function npmExecutable(): string {
-  return process.platform === "win32" ? "npm.cmd" : "npm";
-}
-
 function stopService(name: RuntimeServiceName): boolean {
   const pid = readPid(name);
   let stopped = false;
@@ -961,6 +968,7 @@ function killProcessTree(pid: number, signal: NodeJS.Signals): boolean {
   if (process.platform === "win32") {
     const result = spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], {
       stdio: "ignore",
+      windowsHide: true,
     });
     return result.status === 0;
   }
@@ -1012,6 +1020,7 @@ function ensureUiCertificate(host: string): UiCertificate {
   ], {
     encoding: "utf-8",
     stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
   });
   if (result.error && (result.error as NodeJS.ErrnoException).code === "ENOENT") {
     throw new Error("openssl is required to generate the local Agent UI HTTPS certificate");
@@ -1238,13 +1247,63 @@ export function workerImageBuildReason(
   return null;
 }
 
-function ensureWorkerImage(forceRebuild = false): void {
+export function workerImageDockerBuildSpawnOptions(): SpawnOptions {
+  return {
+    cwd: resolveRepoRoot(),
+    stdio: ["ignore", "pipe", "pipe"],
+    env: { ...process.env, ...loadLocalSecrets(), HOMERAIL_HOME: getHomerailHome() },
+    shell: false,
+    windowsHide: true,
+  };
+}
+
+export function runWorkerImageDockerBuild(
+  dockerBin: string,
+  args: string[],
+  spawnImpl: typeof spawn = spawn,
+  writeStdout: (chunk: Buffer | string) => void = (chunk) => { process.stdout.write(chunk); },
+  writeStderr: (chunk: Buffer | string) => void = (chunk) => { process.stderr.write(chunk); },
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawnImpl(dockerBin, args, workerImageDockerBuildSpawnOptions());
+    } catch (error) {
+      reject(error);
+      return;
+    }
+
+    let settled = false;
+    const finish = (error?: Error): void => {
+      if (settled) return;
+      settled = true;
+      if (error) reject(error);
+      else resolve();
+    };
+    child.stdout?.on("data", writeStdout);
+    child.stderr?.on("data", writeStderr);
+    child.once("error", (error) => finish(error));
+    child.once("close", (code, signal) => {
+      if (code === 0) {
+        finish();
+        return;
+      }
+      const detail = code === null
+        ? signal ? `signal ${signal}` : "unknown exit status"
+        : `exit code ${code}`;
+      finish(new Error(`failed to build ${WORKER_IMAGE_TAG} (${detail})`));
+    });
+  });
+}
+
+async function ensureWorkerImage(forceRebuild = false): Promise<void> {
   const dockerBin = resolveDockerBinary();
   writeWorkerImageRuntimeStatus("checking", {
     message: "Checking DAG worker image before DAG runs are enabled.",
   });
   const dockerVersion = spawnSync(dockerBin, ["--version"], {
     encoding: "utf-8",
+    windowsHide: true,
   });
   if (dockerVersion.error && (dockerVersion.error as NodeJS.ErrnoException).code === "ENOENT") {
     throw new Error(dockerMissingMessage(dockerBin));
@@ -1263,6 +1322,7 @@ function ensureWorkerImage(forceRebuild = false): void {
     WORKER_IMAGE_TAG,
   ], {
     encoding: "utf-8",
+    windowsHide: true,
   });
   const reason = workerImageBuildReason(inspect.status === 0, inspect.stdout, sourceFingerprint, forceRebuild);
   if (!reason) {
@@ -1277,7 +1337,7 @@ function ensureWorkerImage(forceRebuild = false): void {
     reason,
     message: `${label} DAG worker image. DAG runs are temporarily unavailable until this finishes.`,
   });
-  const build = spawnSync(dockerBin, [
+  await runWorkerImageDockerBuild(dockerBin, [
     "build",
     "-f",
     "homerail_worker/Dockerfile",
@@ -1286,14 +1346,7 @@ function ensureWorkerImage(forceRebuild = false): void {
     "-t",
     WORKER_IMAGE_TAG,
     ".",
-  ], {
-    cwd: resolveRepoRoot(),
-    stdio: "inherit",
-    env: { ...process.env, ...loadLocalSecrets(), HOMERAIL_HOME: getHomerailHome() },
-  });
-  if (build.status !== 0) {
-    throw new Error(`failed to build ${WORKER_IMAGE_TAG}`);
-  }
+  ]);
   writeWorkerImageRuntimeStatus("ready", {
     reason,
     message: `${WORKER_IMAGE_TAG} is ready for DAG runs.`,

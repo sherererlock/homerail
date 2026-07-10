@@ -135,7 +135,10 @@ function modelRuntimeBaseUrl(setting: LlmSettingSummary): string {
   return stringValue(setting.base_url ?? setting.baseUrl);
 }
 
-const defaultCommandRunner: CommandRunner = (file, args, options) => spawnSync(file, args, options);
+const defaultCommandRunner: CommandRunner = (file, args, options) => spawnSync(file, args, {
+  ...options,
+  windowsHide: true,
+});
 
 function outputText(value: string | Buffer | null | undefined): string {
   if (typeof value === "string") return value;
