@@ -5,12 +5,17 @@ import {
 } from "../persistence/manager-agent-config.js";
 import { resolveManagerAgentConfig } from "./manager-agent-container.js";
 import { normalizeManagerAgentHarness } from "homerail-protocol";
+import { listCodexModels, type CodexModelCatalog } from "./codex-models.js";
 
 interface BaseResponse {
   success: boolean;
   message: string;
   data?: unknown;
   error?: string;
+}
+
+export interface ManagerAgentConfigRoutesOptions {
+  loadCodexModels?: () => Promise<CodexModelCatalog>;
 }
 
 function json(res: http.ServerResponse, status: number, body: BaseResponse): void {
@@ -78,9 +83,24 @@ export function validateConfigPatch(patch: Record<string, unknown>): void {
   });
 }
 
-export function managerAgentConfigRoutesHandler(req: http.IncomingMessage, res: http.ServerResponse): boolean {
+export function managerAgentConfigRoutesHandler(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  options: ManagerAgentConfigRoutesOptions = {},
+): boolean {
   const pathname = new URL(req.url || "/", "http://localhost").pathname;
   const method = req.method || "GET";
+
+  if (pathname === "/api/manager-agent/codex-models") {
+    if (method !== "GET") {
+      badRequest(res, "Unsupported Codex models method");
+      return true;
+    }
+    (options.loadCodexModels ?? listCodexModels)()
+      .then((catalog) => ok(res, "Codex models loaded", catalog))
+      .catch((error) => serverError(res, error instanceof Error ? error.message : String(error)));
+    return true;
+  }
 
   if (pathname !== "/api/manager-agent/config") return false;
 

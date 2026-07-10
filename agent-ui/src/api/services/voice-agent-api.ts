@@ -245,6 +245,28 @@ export interface CodexStatus {
   version?: string
 }
 
+export interface CodexModelServiceTier {
+  id: string
+  name: string
+  description: string
+}
+
+export interface CodexModel {
+  id: string
+  model: string
+  display_name: string
+  description: string
+  is_default: boolean
+  default_reasoning_effort: string
+  supported_reasoning_efforts: string[]
+  service_tiers: CodexModelServiceTier[]
+}
+
+export interface CodexModelCatalog {
+  binary: string
+  models: CodexModel[]
+}
+
 export interface ManagerAgentReadiness {
   ready: boolean
   status: 'ready' | 'blocked'
@@ -302,6 +324,10 @@ export interface DockerWorkspaceProbeResult {
 export async function getCodexStatus(): Promise<CodexStatus> {
   const res = await http.get<any>('/api/voice-agent/codex-status')
   return res.data ?? { available: false, logged_in: false }
+}
+
+export async function getCodexModels(): Promise<BaseResponse<CodexModelCatalog>> {
+  return http.get<BaseResponse<CodexModelCatalog>>('/api/manager-agent/codex-models') as unknown as Promise<BaseResponse<CodexModelCatalog>>
 }
 
 export async function getManagerAgentReadiness(): Promise<ManagerAgentReadiness> {
