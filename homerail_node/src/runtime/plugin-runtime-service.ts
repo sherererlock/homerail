@@ -1076,10 +1076,14 @@ function canonicalSubset(raw: string[] | undefined, allowed: ReadonlySet<string>
   return values;
 }
 
+function hasInsecurePosixAccess(stat: fs.Stats): boolean {
+  return typeof process.getuid === "function" && (stat.mode & 0o077) !== 0;
+}
+
 function secureDirectory(dir: string): string {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const stat = fs.lstatSync(dir);
-  if (stat.isSymbolicLink() || !stat.isDirectory() || (stat.mode & 0o077) !== 0) throw new Error(`Unsafe Plugin Runtime directory: ${dir}`);
+  if (stat.isSymbolicLink() || !stat.isDirectory() || hasInsecurePosixAccess(stat)) throw new Error(`Unsafe Plugin Runtime directory: ${dir}`);
   return fs.realpathSync(dir);
 }
 
@@ -1092,7 +1096,7 @@ function secureRegularFile(file: string): string {
 
 function readSecureJson(file: string, maxBytes: number): unknown {
   const stat = fs.lstatSync(file);
-  if (stat.isSymbolicLink() || !stat.isFile() || (stat.mode & 0o077) !== 0
+  if (stat.isSymbolicLink() || !stat.isFile() || hasInsecurePosixAccess(stat)
     || stat.size < 2 || stat.size > maxBytes) {
     throw new Error("Plugin Runtime state file is unsafe");
   }
@@ -1121,8 +1125,12 @@ function atomicSecureJson(file: string, value: unknown, maxBytes: number): void 
     fs.closeSync(descriptor);
     descriptor = undefined;
     fs.renameSync(temp, file);
-    const directory = fs.openSync(path.dirname(file), fs.constants.O_RDONLY);
-    try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
+    // Windows rejects fsync on directory handles with EPERM. The file itself
+    // is already flushed before the atomic rename above.
+    if (process.platform !== "win32") {
+      const directory = fs.openSync(path.dirname(file), fs.constants.O_RDONLY);
+      try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
+    }
   } finally {
     if (descriptor !== undefined) fs.closeSync(descriptor);
     fs.rmSync(temp, { force: true });

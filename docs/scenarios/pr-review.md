@@ -29,21 +29,38 @@ metadata.
 ## Execution
 
 1. Manager atomically reserves the declared usage budget.
-2. A preparer clones and checks out the exact head commit in a shared isolated
-   workspace.
+2. A deterministic Manager command validates the credential-free GitHub API
+   HTTPS clone URLs (`https://host/owner/repository.git`, including GitHub
+   Enterprise hosts), clones both exact revisions into the isolated run
+   workspace, verifies
+   `HEAD`, and computes the changed-file list, short diff summary, and a bounded
+   high-context patch. Git runs with credential helpers, prompts, hooks, and
+   local/ext protocols disabled; no model tool call is involved in checkout or
+   evidence collection. The serialized review context is capped below the
+   Manager command-output limit and records `diff_truncated` explicitly.
 3. Runtime, security, tests, and frontend reviewers inspect the same exact diff
-   independently and in parallel. Their Docker workspace mount is read-only;
-   only the preparer receives a writable workspace.
-4. A synthesizer preserves all reviewer results and deduplicates findings.
-5. Evidence, false-positive, and coverage voters independently validate the
+   independently and in parallel. The Manager-produced patch is embedded in the
+   typed input, so provider-specific shell/file tools are unnecessary. Reviewers
+   receive no built-in tools and only the `handoff` DAG tool. Patch content is
+   untrusted evidence, never an instruction. If evidence had to be truncated,
+   reviewers fail closed and the report becomes inconclusive.
+4. A deterministic normalizer preserves every valid reviewer result. If a
+   reviewer exhausts contract correction without a handoff, the normalizer
+   emits a `status: failed` ReviewerResult with grounded runtime evidence so the
+   DAG produces an honest inconclusive artifact instead of stalling.
+5. A synthesizer preserves all reviewer results and deduplicates findings.
+6. Evidence, false-positive, and coverage voters independently validate the
    draft report. Evidence and false-positive voters produce a machine-readable
-   verdict for every retained finding.
-6. A deterministic two-of-three join decides whether verification reached
+   verdict for every retained finding against the same patch. Rejecting a false
+   finding is a successful correction and does not reject the whole report;
+   missing reviewer coverage, truncated evidence, an identity mismatch, or an
+   unresolvable finding does.
+7. A deterministic two-of-three join decides whether verification reached
    quorum.
-7. A branch-merge join normalizes either quorum outcome into one path. A
+8. A branch-merge join normalizes either quorum outcome into one path. A
    refiner removes findings specifically rejected by an evidence or
    false-positive verdict and recomputes the report.
-8. The refiner persists the final structured report and quorum as JSON. A small
+9. The refiner persists the final structured report and quorum as JSON. A small
    publisher renders only Markdown plus the exact runtime id, avoiding a second
    model-generated copy of the full report. Manager materializes both declared
    artifacts. Failed quorum produces an `inconclusive` report instead of a
@@ -53,7 +70,7 @@ metadata.
 
 - `pr-review.json`
 - `pr-review.md`
-- four independent reviewer handoffs
+- four normalized independent reviewer results
 - three independent verification votes
 - per-finding evidence and false-positive verdicts
 - deterministic quorum payload
@@ -76,6 +93,9 @@ and Worker protocol at the same commit instead of sending a new template to a
 stale long-lived Manager. Workflow contracts, per-finding verification, and the
 deterministic quorum remain authoritative; the adapter does not reconstruct a
 report from raw handoffs.
+The isolated Manager command allowlist includes `node` and `git`; checkout and
+diff capture use only the tracked fixed command and never accept an executable
+or argument vector from pull request content.
 The adapter verifies that the run reached the terminal state implied by quorum,
 both artifacts are structured and non-empty, the quorum is 2-of-3, and Markdown
 contains the exact HomeRail run id and report identity. A valid rejected quorum

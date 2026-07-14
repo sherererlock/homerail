@@ -16,6 +16,7 @@ import { loadRunSnapshot } from "../src/persistence/store.js";
 import { getRunArtifactBlobPath } from "../src/persistence/run-artifacts.js";
 import {
   _clearActiveRuns,
+  failActiveRun,
   getActiveRun,
   handoffActiveRun,
 } from "../src/runtime/active-runs.js";
@@ -49,16 +50,66 @@ function passingReviewReport(): Record<string, unknown> {
   };
 }
 
+function installPrepareCommandStub(
+  parsed: ReturnType<typeof parseWorkflowSource>,
+  options: { diffTruncated?: boolean } = {},
+): void {
+  const prepare = parsed.graph.nodes.find((node) => node.node_id === "prepare");
+  if (!prepare?.gateway_config) throw new Error("prepare command node is missing");
+  const diffTruncated = options.diffTruncated ?? false;
+  prepare.gateway_config.command = [
+    "node",
+    "-e",
+    "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const i=JSON.parse(s),r=Array.isArray(i.request)?i.request.at(-1):undefined,p=r?.input?.payload;if(!p)throw new Error('missing request');process.stdout.write(JSON.stringify({repo:p.repo,pr:p.pr,base:p.base,head:p.head,repository_path:'/workspace/repository',changed_files:['src/run.ts'],diff_stat:'1 file changed',diff_patch:'diff --git a/src/run.ts b/src/run.ts',diff_truncated:" + JSON.stringify(diffTruncated) + "}))})",
+  ];
+}
+
+function productionPrepareCommand(): string {
+  const source = fs.readFileSync(
+    path.resolve(process.cwd(), "..", "assets", "orchestrations", "pr-review.yaml.template"),
+    "utf8",
+  );
+  const parsed = parseWorkflowSource(source);
+  const command = parsed.graph.nodes.find((node) => node.node_id === "prepare")?.gateway_config?.command;
+  if (!Array.isArray(command) || typeof command[2] !== "string") {
+    throw new Error("production prepare command is missing");
+  }
+  return command[2];
+}
+
+function prepareCommandInput(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    request: [{
+      input: {
+        payload: {
+          repo: "enterprise/homerail",
+          pr: 8,
+          base: "a".repeat(40),
+          head: "b".repeat(40),
+          base_clone_url: "https://github.example/enterprise/homerail.git",
+          head_clone_url: "https://github.example/enterprise/homerail.git",
+          expected_usage: 8,
+          budget_key: "pr-review:enterprise/homerail:prepare-command",
+          ...overrides,
+        },
+      },
+    }],
+  };
+}
+
 describe("PR Review scenario assets", () => {
   let oldHome: string | undefined;
   let oldAssetDir: string | undefined;
+  let oldCommandAllowlist: string | undefined;
   let tmpHome: string;
 
   beforeEach(() => {
     oldHome = process.env.HOMERAIL_HOME;
     oldAssetDir = process.env.HOMERAIL_ASSET_DIR;
+    oldCommandAllowlist = process.env.HOMERAIL_DAG_COMMAND_ALLOWLIST;
     tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "homerail-pr-review-scenario-"));
     process.env.HOMERAIL_HOME = tmpHome;
+    process.env.HOMERAIL_DAG_COMMAND_ALLOWLIST = "node";
     delete process.env.HOMERAIL_ASSET_DIR;
     closeDb();
     _clearActiveRuns();
@@ -71,6 +122,8 @@ describe("PR Review scenario assets", () => {
     else process.env.HOMERAIL_HOME = oldHome;
     if (oldAssetDir === undefined) delete process.env.HOMERAIL_ASSET_DIR;
     else process.env.HOMERAIL_ASSET_DIR = oldAssetDir;
+    if (oldCommandAllowlist === undefined) delete process.env.HOMERAIL_DAG_COMMAND_ALLOWLIST;
+    else process.env.HOMERAIL_DAG_COMMAND_ALLOWLIST = oldCommandAllowlist;
     fs.rmSync(tmpHome, { recursive: true, force: true });
   });
 
@@ -95,12 +148,35 @@ describe("PR Review scenario assets", () => {
       }),
     ]);
     const nodes = result.canonical?.nodes ?? [];
-    expect(nodes.filter((node) => node.id.endsWith("_review")).map((node) => node.id).sort()).toEqual([
+    expect(nodes.filter((node) => node.id.endsWith("_review") && !node.id.startsWith("normalize_"))
+      .map((node) => node.id).sort()).toEqual([
       "frontend_review",
       "runtime_review",
       "security_review",
       "test_review",
     ]);
+    for (const reviewer of ["runtime", "security", "test", "frontend"]) {
+      expect(nodes.find((node) => node.id === `${reviewer}_review`)?.config).toMatchObject({
+        allowed_builtin_tools: [],
+        allowed_dag_tools: ["handoff"],
+      });
+      expect(nodes.find((node) => node.id === `normalize_${reviewer}_review`)).toMatchObject({
+        kind: "command",
+        depends_on: [`${reviewer}_review`],
+        outputs: [expect.objectContaining({ name: "reviewed", contract: "ReviewerResult" })],
+        config: expect.objectContaining({
+          success_port: "reviewed",
+          failure_port: "reviewed",
+          parse_stdout: "json",
+          result_payload: "value",
+        }),
+      });
+    }
+    expect(nodes.find((node) => node.id === "collect_reviews")?.config).toMatchObject({
+      mode: "all",
+      field: "status",
+      success_values: ["complete", "failed"],
+    });
     expect(nodes.find((node) => node.id === "verification_quorum")?.config).toMatchObject({
       mode: "n_of_m",
       threshold: 2,
@@ -109,6 +185,18 @@ describe("PR Review scenario assets", () => {
     expect(nodes.find((node) => node.id === "coverage_vote")?.outputs).toEqual(expect.arrayContaining([
       expect.objectContaining({ name: "voted", contract: "CoverageVote" }),
     ]));
+    for (const voter of ["evidence_vote", "false_positive_vote"]) {
+      expect(nodes.find((node) => node.id === voter)).toMatchObject({
+        config: expect.objectContaining({
+          allowed_builtin_tools: [],
+          allowed_dag_tools: ["handoff"],
+        }),
+        inputs: expect.arrayContaining([
+          expect.objectContaining({ name: "report", contract: "DraftReviewReport" }),
+          expect.objectContaining({ name: "context", contract: "ReviewContext" }),
+        ]),
+      });
+    }
     expect(nodes.find((node) => node.id === "quorum_result")?.config).toMatchObject({
       mode: "any",
       field: "passed",
@@ -126,7 +214,6 @@ describe("PR Review scenario assets", () => {
     });
     const agents = parseWorkflowSource(source).meta.agents ?? {};
     for (const agentId of [
-      "preparer",
       "runtime_reviewer",
       "security_reviewer",
       "test_reviewer",
@@ -140,28 +227,79 @@ describe("PR Review scenario assets", () => {
     ]) {
       expect(agents[agentId]?.system).toMatch(/final action MUST\s+call\s+(?:the\s+)?handoff/);
     }
-    expect(agents.preparer?.system).toContain('"repository_path":"/workspace/repository"');
-    expect(agents.preparer?.system).toContain("base_clone_url");
-    expect(agents.preparer?.system).toContain("head_clone_url");
-    expect(agents.preparer?.system).toContain("Manager contract validation already guarantees");
-    expect(agents.preparer?.system).toContain("Never persist, copy, or summarize the input into a file");
-    expect(agents.preparer?.system).toContain("Never create /workspace/repository.git");
-    expect(agents.preparer?.system).toContain("never claim a required field is missing after using it");
-    expect(agents.preparer?.system).toContain("Do not use git verify-commit");
-    expect(agents.preparer?.system).toContain("git diff --shortstat");
-    expect(agents.preparer?.system).toContain("Never put the per-file --stat output in diff_stat");
-    expect(agents.preparer?.system).not.toContain("https://github.com/<repo>.git");
-    expect(agents.preparer?.system).not.toContain('"status":"ready"');
-    expect(nodes.find((node) => node.id === "prepare")?.config).toMatchObject({
-      allowed_builtin_tools: ["Bash", "Glob", "Grep", "Read"],
-      allowed_dag_tools: ["handoff"],
+    for (const agentId of [
+      "runtime_reviewer",
+      "security_reviewer",
+      "test_reviewer",
+      "frontend_reviewer",
+      "evidence_voter",
+      "false_positive_voter",
+    ]) {
+      expect(agents[agentId]?.system).toContain("diff_truncated");
+    }
+    for (const agentId of [
+      "runtime_reviewer",
+      "synthesizer",
+      "evidence_voter",
+      "false_positive_voter",
+    ]) {
+      expect(agents[agentId]?.system).toMatch(/GitHub\s+Enterprise/);
+      expect(agents[agentId]?.system).toContain("clone_url");
+    }
+    const prepare = nodes.find((node) => node.id === "prepare");
+    expect(prepare).toMatchObject({
+      kind: "command",
+      config: expect.objectContaining({
+        command: ["node", "-e", expect.any(String)],
+        cwd: "$run_workspace",
+        stdin_field: "$inputs",
+        success_port: "ready",
+        failure_port: "failed",
+        parse_stdout: "json",
+        result_payload: "value",
+      }),
     });
+    const prepareCode = String((prepare?.config?.command as unknown[] | undefined)?.[2]);
+    expect(prepareCode).toContain("base_clone_url");
+    expect(prepareCode).toContain("head_clone_url");
+    expect(prepareCode).toContain("[A-Za-z0-9_.-]+\\/[A-Za-z0-9_.-]+\\.git$");
+    expect(prepareCode).toContain("credential.helper=");
+    expect(prepareCode).toContain("GIT_CONFIG_NOSYSTEM");
+    expect(prepareCode).toContain("protocol.file.allow=never");
+    expect(prepareCode).toContain("--shortstat");
+    expect(prepareCode).toContain("--unified=80");
+    expect(prepareCode).toContain("diff_patch");
+    expect(prepareCode).toContain("diff_truncated");
+    expect(prepareCode).toContain("repository_path: '/workspace/repository'");
+    expect(agents).not.toHaveProperty("preparer");
     expect(result.canonical?.policies?.max_corrections_per_node).toBe(5);
     expect(nodes.find((node) => node.id === "synthesize")?.inputs).toEqual(expect.arrayContaining([
       expect.objectContaining({ name: "context" }),
     ]));
 
     const contracts = parseWorkflowSource(source).meta.contracts ?? {};
+    expect(validateJsonContract(contracts.ReviewContext, {
+      repo: "xiaotianfotos/homerail",
+      pr: 25,
+      base: "a".repeat(40),
+      head: "b".repeat(40),
+      repository_path: "/workspace/repository",
+      changed_files: ["src/run.ts"],
+      diff_stat: "1 file changed",
+      diff_patch: "diff --git a/src/run.ts b/src/run.ts",
+      diff_truncated: false,
+    })).toMatchObject({ valid: true });
+    expect(validateJsonContract(contracts.ReviewContext, {
+      repo: "xiaotianfotos/homerail",
+      pr: 25,
+      base: "a".repeat(40),
+      head: "b".repeat(40),
+      repository_path: "/workspace/repository",
+      changed_files: ["src/run.ts"],
+      diff_stat: "1 file changed",
+      diff_patch: "diff --git a/src/run.ts b/src/run.ts\n... truncated",
+      diff_truncated: true,
+    })).toMatchObject({ valid: true });
     const finalReview = {
       report: passingReviewReport(),
       quorum: { passed: true, successes: 2, total: 3, threshold: 2 },
@@ -224,6 +362,10 @@ describe("PR Review scenario assets", () => {
     expect(validateJsonContract(inputContract, reviewInput)).toMatchObject({ valid: true });
     expect(validateJsonContract(inputContract, {
       ...reviewInput,
+      base_clone_url: "https://github.example/git/enterprise/homerail.git",
+    })).toMatchObject({ valid: false });
+    expect(validateJsonContract(inputContract, {
+      ...reviewInput,
       base_clone_url: "https://token@github.example/enterprise/homerail.git",
     })).toMatchObject({ valid: false });
     expect(validateJsonContract(inputContract, {
@@ -235,6 +377,81 @@ describe("PR Review scenario assets", () => {
       head: "b".repeat(12),
     })).toMatchObject({ valid: false });
   });
+
+  it("executes production prepare URL validation against hostile clone URLs", () => {
+    const cwd = path.join(tmpHome, "prepare-url-validation");
+    fs.mkdirSync(cwd, { recursive: true });
+    const command = productionPrepareCommand();
+    for (const base_clone_url of [
+      "https://token@github.example/enterprise/homerail.git",
+      "http://github.example/enterprise/homerail.git",
+      "https://github.example/enterprise/homerail.git?token=secret",
+      "https://github.example/git/enterprise/homerail.git",
+    ]) {
+      const result = spawnSync(process.execPath, ["-e", command], {
+        cwd,
+        encoding: "utf8",
+        input: JSON.stringify(prepareCommandInput({ base_clone_url })),
+        maxBuffer: 2_000_000,
+      });
+      expect(result.status).not.toBe(0);
+      expect(`${result.stderr}${result.stdout}`).toContain("repository URL must be credential-free HTTPS");
+      expect(fs.existsSync(path.join(cwd, "repository"))).toBe(false);
+    }
+  }, 30_000);
+
+  it.runIf(process.platform !== "win32")(
+    "executes production prepare truncation with deterministic Git output",
+    () => {
+      const cwd = path.join(tmpHome, "prepare-truncation");
+      const bin = path.join(cwd, "bin");
+      fs.mkdirSync(bin, { recursive: true });
+      const fakeGit = path.join(bin, "fake-git.cjs");
+      const head = "b".repeat(40);
+      fs.writeFileSync(fakeGit, [
+        "const fs = require('node:fs');",
+        "const args = process.argv.slice(2);",
+        "const has = (value) => args.includes(value);",
+        "if (has('clone')) fs.mkdirSync(args.at(-1), { recursive: true });",
+        `else if (has('rev-parse')) process.stdout.write(${JSON.stringify(head)});`,
+        `else if (has('diff') && has('--name-only')) process.stdout.write(${JSON.stringify("src/quoted.ts\0")});`,
+        "else if (has('diff') && has('--shortstat')) process.stdout.write('1 file changed, 1 insertion(+), 1 deletion(-)');",
+        "else if (has('diff')) process.stdout.write('\"'.repeat(700000));",
+      ].join("\n"));
+      const git = path.join(bin, "git");
+      fs.writeFileSync(git, `#!/usr/bin/env node\nrequire(${JSON.stringify(fakeGit)});\n`);
+      fs.chmodSync(git, 0o755);
+
+      const result = spawnSync(process.execPath, ["-e", productionPrepareCommand()], {
+        cwd,
+        encoding: "utf8",
+        input: JSON.stringify(prepareCommandInput()),
+        env: {
+          ...process.env,
+          PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+        },
+        maxBuffer: 2_000_000,
+      });
+      if (result.status !== 0) {
+        throw new Error(`production prepare command failed: ${result.stderr || result.stdout}`);
+      }
+      const context = JSON.parse(result.stdout) as {
+        head: string;
+        changed_files: string[];
+        diff_patch: string;
+        diff_truncated: boolean;
+      };
+      expect(context).toMatchObject({
+        head,
+        changed_files: ["src/quoted.ts"],
+        diff_truncated: true,
+      });
+      expect(context.diff_patch).toContain("HomeRail diff truncated by deterministic evidence limit");
+      expect(context.diff_patch.length).toBeLessThan(500000);
+      expect(Buffer.byteLength(result.stdout, "utf8")).toBeLessThanOrEqual(900000);
+    },
+    30_000,
+  );
 
   it("installs Manager guidance and lists tracked template assets", async () => {
     expect(ensureManagerSkillsInstalled().installed).toContain("homerail-pr-review");
@@ -427,6 +644,7 @@ describe("PR Review scenario assets", () => {
     );
     const parsed = parseWorkflowSource(source);
     for (const agent of Object.values(parsed.meta.agents ?? {})) agent.agent_type = "deterministic";
+    installPrepareCommandStub(parsed);
     const dispatcher = new FakeDAGDispatcher();
     const executor = new GraphExecutor(dispatcher);
     const input = {
@@ -446,19 +664,12 @@ describe("PR Review scenario assets", () => {
     };
     executor.createRun("pr-review-runtime", parsed, JSON.stringify(input));
     expect(executor.tick("pr-review-runtime")).toBeGreaterThan(0);
-    expect(dispatcher.dispatched.at(-1)?.nodeId).toBe("prepare");
-
-    const context = {
-      repo: "xiaotianfotos/homerail",
-      pr: 25,
-      base: "a".repeat(40),
-      head: "b".repeat(40),
-      repository_path: "/workspace/repository",
-      changed_files: ["src/run.ts"],
-      diff_stat: "1 file changed",
-    };
-    handoffActiveRun("pr-review-runtime", "prepare", "ready", context);
-    expect(executor.tick("pr-review-runtime")).toBe(4);
+    expect(dispatcher.dispatched.map((envelope) => envelope.nodeId).sort()).toEqual([
+      "frontend_review",
+      "runtime_review",
+      "security_review",
+      "test_review",
+    ]);
 
     const categories = ["runtime", "security", "tests", "frontend"] as const;
     for (const category of categories) {
@@ -516,5 +727,157 @@ describe("PR Review scenario assets", () => {
       .toMatchObject({ report: { status: "pass" }, quorum: { passed: true, successes: 2 } });
     expect(fs.readFileSync(getRunArtifactBlobPath("pr-review-runtime", "pr-review.md")!, "utf8"))
       .toBe("# HomeRail PR Review\n\n**HomeRail Run ID:** `pr-review-runtime`\n\nNo actionable findings.\n");
+  });
+
+  it("fails verification closed when the deterministic diff evidence is truncated", () => {
+    const source = fs.readFileSync(
+      path.resolve(process.cwd(), "..", "assets", "orchestrations", "pr-review.yaml.template"),
+      "utf8",
+    );
+    const parsed = parseWorkflowSource(source);
+    for (const agent of Object.values(parsed.meta.agents ?? {})) agent.agent_type = "deterministic";
+    installPrepareCommandStub(parsed, { diffTruncated: true });
+    const dispatcher = new FakeDAGDispatcher();
+    const executor = new GraphExecutor(dispatcher);
+    const runId = "pr-review-truncated-evidence";
+    const input = {
+      trigger_id: "manual",
+      trigger_type: "manual",
+      fire_key: "manual:xiaotianfotos/homerail#25:truncated",
+      payload: {
+        repo: "xiaotianfotos/homerail",
+        pr: 25,
+        base: "a".repeat(40),
+        head: "b".repeat(40),
+        base_clone_url: "https://github.com/xiaotianfotos/homerail.git",
+        head_clone_url: "https://github.com/xiaotianfotos/homerail.git",
+        expected_usage: 8,
+        budget_key: "pr-review:xiaotianfotos/homerail:truncated",
+      },
+    };
+    executor.createRun(runId, parsed, JSON.stringify(input));
+    expect(executor.tick(runId)).toBeGreaterThan(0);
+    expect(loadRunSnapshot(runId)?.handoffs.find(
+      (handoff) => handoff.fromNode === "prepare" && handoff.port === "ready",
+    )?.content).toMatchObject({ diff_truncated: true });
+    expect(dispatcher.dispatched.map((envelope) => envelope.nodeId).sort()).toEqual([
+      "frontend_review",
+      "runtime_review",
+      "security_review",
+      "test_review",
+    ]);
+
+    for (const reviewer of ["runtime", "security", "test", "frontend"] as const) {
+      failActiveRun(runId, `${reviewer}_review`, "bounded diff_patch was truncated");
+    }
+    expect(executor.tick(runId)).toBeGreaterThan(0);
+    expect(dispatcher.dispatched.at(-1)?.nodeId).toBe("synthesize");
+
+    const reviewerResults = (["runtime", "security", "tests", "frontend"] as const).map((reviewer) => ({
+      reviewer,
+      status: "failed",
+      summary: `${reviewer} reviewer refused truncated diff evidence`,
+      findings: [],
+    }));
+    handoffActiveRun(runId, "synthesize", "drafted", {
+      ...passingReviewReport(),
+      status: "inconclusive",
+      confidence: "low",
+      summary: "The deterministic diff evidence was truncated.",
+      reviewer_results: reviewerResults,
+    });
+    expect(executor.tick(runId)).toBe(3);
+    handoffActiveRun(runId, "evidence_vote", "voted", {
+      voter: "evidence",
+      vote: "reject",
+      confidence: "high",
+      evidence: "diff_truncated=true",
+      finding_verdicts: [],
+    });
+    handoffActiveRun(runId, "false_positive_vote", "voted", {
+      voter: "false_positive",
+      vote: "reject",
+      confidence: "high",
+      evidence: "diff_truncated=true",
+      finding_verdicts: [],
+    });
+    handoffActiveRun(runId, "coverage_vote", "voted", {
+      voter: "coverage",
+      vote: "reject",
+      confidence: "high",
+      evidence: "all four reviewers failed closed on truncated evidence",
+    });
+    expect(executor.tick(runId)).toBeGreaterThan(0);
+    expect(loadRunSnapshot(runId)?.handoffs.find(
+      (handoff) => handoff.fromNode === "verification_quorum" && handoff.port === "rejected",
+    )?.content).toMatchObject({
+      passed: false,
+      successes: 0,
+      failures: 3,
+      total: 3,
+      threshold: 2,
+    });
+    expect(dispatcher.dispatched.at(-1)?.nodeId).toBe("refine");
+  });
+
+  it("normalizes a reviewer failure and continues to synthesis", () => {
+    const source = fs.readFileSync(
+      path.resolve(process.cwd(), "..", "assets", "orchestrations", "pr-review.yaml.template"),
+      "utf8",
+    );
+    const parsed = parseWorkflowSource(source);
+    for (const agent of Object.values(parsed.meta.agents ?? {})) agent.agent_type = "deterministic";
+    installPrepareCommandStub(parsed);
+    const dispatcher = new FakeDAGDispatcher();
+    const executor = new GraphExecutor(dispatcher);
+    const input = {
+      trigger_id: "manual",
+      trigger_type: "manual",
+      fire_key: "manual:xiaotianfotos/homerail#25:reviewer-failure",
+      payload: {
+        repo: "xiaotianfotos/homerail",
+        pr: 25,
+        base: "a".repeat(40),
+        head: "b".repeat(40),
+        base_clone_url: "https://github.com/xiaotianfotos/homerail.git",
+        head_clone_url: "https://github.com/xiaotianfotos/homerail.git",
+        expected_usage: 8,
+        budget_key: "pr-review:xiaotianfotos/homerail:reviewer-failure",
+      },
+    };
+    executor.createRun("pr-review-reviewer-failure", parsed, JSON.stringify(input));
+    executor.tick("pr-review-reviewer-failure");
+
+    for (const category of ["runtime", "tests", "frontend"] as const) {
+      handoffActiveRun(
+        "pr-review-reviewer-failure",
+        `${category === "tests" ? "test" : category}_review`,
+        "reviewed",
+        {
+          reviewer: category,
+          status: "complete",
+          summary: `${category} review complete`,
+          findings: [],
+        },
+      );
+    }
+    failActiveRun(
+      "pr-review-reviewer-failure",
+      "security_review",
+      "agent ended without DAG handoff after correction exhaustion",
+    );
+    expect(executor.tick("pr-review-reviewer-failure")).toBeGreaterThan(0);
+    expect(dispatcher.dispatched.at(-1)?.nodeId).toBe("synthesize");
+
+    const normalized = loadRunSnapshot("pr-review-reviewer-failure")?.handoffs.find((handoff) =>
+      handoff.fromNode === "normalize_security_review" && handoff.port === "reviewed"
+    );
+    expect(normalized?.content).toMatchObject({
+      reviewer: "security",
+      status: "failed",
+      findings: [],
+    });
+    expect(String((normalized?.content as { summary?: unknown } | undefined)?.summary))
+      .toContain("agent ended without DAG handoff after correction exhaustion");
   });
 });

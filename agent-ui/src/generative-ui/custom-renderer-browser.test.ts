@@ -16,6 +16,7 @@ import {
 
 let browser: Browser | undefined
 let server: http.Server | undefined
+const browserIsolationTimeout = process.platform === 'win32' ? 120_000 : 45_000
 
 async function listen(): Promise<{ origin: string }> {
   server = http.createServer((_req, res) => {
@@ -88,9 +89,22 @@ describe('Custom Renderer real Chromium isolation', () => {
       context: { device: 'desktop' },
     } as never)
 
+    const programFiles = process.env.ProgramFiles ?? process.env.PROGRAMFILES
+    const programFilesX86 = process.env['ProgramFiles(x86)'] ?? process.env['PROGRAMFILES(X86)']
+    const localAppData = process.env.LocalAppData ?? process.env.LOCALAPPDATA
+    const windowsBrowserPaths = process.platform === 'win32'
+      ? [
+          programFiles && path.join(programFiles, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+          programFilesX86 && path.join(programFilesX86, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+          localAppData && path.join(localAppData, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+          programFiles && path.join(programFiles, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+          programFilesX86 && path.join(programFilesX86, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+        ].filter((candidate): candidate is string => Boolean(candidate))
+      : []
     const executablePath = [
       process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
       process.env.CHROME_BIN,
+      ...windowsBrowserPaths,
       path.join(os.homedir(), '.local/bin/google-chrome'),
       '/usr/bin/google-chrome',
       '/usr/bin/chromium',
@@ -171,5 +185,5 @@ describe('Custom Renderer real Chromium isolation', () => {
     expect(page.frames().some(frame => frame.url().includes('attacker.invalid'))).toBe(false)
     expect(navigations.some(url => url.includes('attacker.invalid'))).toBe(false)
     expect(leakedRequests).toEqual([])
-  }, 45_000)
+  }, browserIsolationTimeout)
 })
