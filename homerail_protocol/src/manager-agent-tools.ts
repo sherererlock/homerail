@@ -38,6 +38,13 @@ export const MANAGER_AGENT_COMMON_TOOL_NAMES = [
   "run_pr_review",
   "run_pr_closeout",
   "create_and_run",
+  "start_supervised_dag",
+  "list_dag_actors",
+  "get_dag_supervision",
+  "send_dag_actor_command",
+  "focus_dag_actor",
+  "cancel_dag_run",
+  "complete_dag_run",
   "invoke_run",
   "get_run_status",
   "run_shell_command",
@@ -72,6 +79,72 @@ export type ManagerAgentCommonToolName =
 export type ManagerAgentHostVoiceToolName = (typeof MANAGER_AGENT_HOST_VOICE_TOOL_NAMES)[number];
 
 export type ManagerAgentToolName = ManagerAgentCommonToolName | ManagerAgentHostVoiceToolName;
+
+export interface ManagerAgentDagCommandResult {
+  resumed: true;
+  previous_round_id: string;
+  round_id: string;
+  ordinal: number;
+  actor_ids: string[];
+  command_ids: string[];
+  dispatched: number;
+  deduplicated?: boolean;
+}
+
+function requiredRecord(value: unknown, label: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} must be an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function requiredResultString(value: unknown, label: string): string {
+  if (typeof value !== "string") {
+    throw new Error(`${label} must be between 1 and 256 characters`);
+  }
+  const normalized = value.trim();
+  if (!normalized || normalized.length > 256) {
+    throw new Error(`${label} must be between 1 and 256 characters`);
+  }
+  return normalized;
+}
+
+function requiredResultStrings(value: unknown, label: string): string[] {
+  if (!Array.isArray(value) || value.length > 128) {
+    throw new Error(`${label} must be an array with at most 128 entries`);
+  }
+  return value.map((entry, index) => requiredResultString(entry, `${label}[${index}]`));
+}
+
+function requiredNonNegativeInteger(value: unknown, label: string): number {
+  if (!Number.isSafeInteger(value) || Number(value) < 0) {
+    throw new Error(`${label} must be a non-negative safe integer`);
+  }
+  return Number(value);
+}
+
+function requiredPositiveInteger(value: unknown, label: string): number {
+  const normalized = requiredNonNegativeInteger(value, label);
+  if (normalized < 1) throw new Error(`${label} must be a positive safe integer`);
+  return normalized;
+}
+
+/** Project the general resume API response onto the stable Actor-only Manager tool contract. */
+export function managerAgentDagCommandResult(value: unknown): ManagerAgentDagCommandResult {
+  const envelope = requiredRecord(value, "Manager command response");
+  const data = requiredRecord(envelope.data, "Manager command response data");
+  if (data.resumed !== true) throw new Error("Manager command response must confirm resumed=true");
+  return {
+    resumed: true,
+    previous_round_id: requiredResultString(data.previous_round_id, "previous_round_id"),
+    round_id: requiredResultString(data.round_id, "round_id"),
+    ordinal: requiredPositiveInteger(data.ordinal, "ordinal"),
+    actor_ids: requiredResultStrings(data.actor_ids, "actor_ids"),
+    command_ids: requiredResultStrings(data.command_ids, "command_ids"),
+    dispatched: requiredNonNegativeInteger(data.dispatched, "dispatched"),
+    ...(data.deduplicated === true ? { deduplicated: true } : {}),
+  };
+}
 
 export const HOMERAIL_PROMPT_TOOL_CALL_PROTOCOL = "homerail_tool_call";
 export const HOMERAIL_PROMPT_HANDOFF_PROTOCOL = "homerail_handoff";
@@ -486,6 +559,104 @@ export const MANAGER_AGENT_TOOL_SPECS: Record<ManagerAgentToolName, AgentToolDef
         { required: ["workflowId"] },
         { required: ["yamlPath"] },
       ],
+      additionalProperties: false,
+    },
+  },
+  start_supervised_dag: {
+    name: "start_supervised_dag",
+    description: "Start a supervised DAG run from a DB workflow_id or repo-local YAML path. Supervision uses stable actor_id values only and never exposes transient Worker or container IDs.",
+    input_schema: {
+      type: "object",
+      properties: {
+        yamlPath: { type: "string" },
+        workflow_id: { type: "string" },
+        workflowId: { type: "string" },
+        profile: { type: "string" },
+        prompt: { type: "string" },
+        runId: { type: "string" },
+      },
+      anyOf: [
+        { required: ["workflow_id"] },
+        { required: ["workflowId"] },
+        { required: ["yamlPath"] },
+      ],
+      additionalProperties: false,
+    },
+  },
+  list_dag_actors: {
+    name: "list_dag_actors",
+    description: "List actors for a supervised DAG run by stable actor_id only; never expose transient Worker or container IDs.",
+    input_schema: {
+      type: "object",
+      properties: { run_id: { type: "string" } },
+      required: ["run_id"],
+      additionalProperties: false,
+    },
+  },
+  get_dag_supervision: {
+    name: "get_dag_supervision",
+    description: "Get supervised DAG status and milestone digests keyed by stable actor_id only; never expose transient Worker or container IDs.",
+    input_schema: {
+      type: "object",
+      properties: {
+        run_id: { type: "string" },
+        max_milestones: { type: "integer", minimum: 1, maximum: 12 },
+      },
+      required: ["run_id"],
+      additionalProperties: false,
+    },
+  },
+  send_dag_actor_command: {
+    name: "send_dag_actor_command",
+    description: "Send a fenced, idempotent command to a stable actor_id; never accept or expose transient Worker or container IDs.",
+    input_schema: {
+      type: "object",
+      properties: {
+        run_id: { type: "string" },
+        actor_id: { type: "string" },
+        expected_round_id: { type: "string" },
+        idempotency_key: { type: "string" },
+        payload: {},
+      },
+      required: ["run_id", "actor_id", "expected_round_id", "idempotency_key", "payload"],
+      additionalProperties: false,
+    },
+  },
+  focus_dag_actor: {
+    name: "focus_dag_actor",
+    description: "Focus the Manager surface on a stable actor_id; never accept or expose transient Worker or container IDs.",
+    input_schema: {
+      type: "object",
+      properties: {
+        run_id: { type: "string" },
+        actor_id: { type: "string" },
+        idempotency_key: { type: "string" },
+        duration_ms: { type: "integer", minimum: 1000, maximum: 300000 },
+      },
+      required: ["run_id", "actor_id", "idempotency_key"],
+      additionalProperties: false,
+    },
+  },
+  cancel_dag_run: {
+    name: "cancel_dag_run",
+    description: "Cancel a supervised DAG run whose actors are addressed by stable actor_id only; never expose transient Worker or container IDs.",
+    input_schema: {
+      type: "object",
+      properties: { run_id: { type: "string" } },
+      required: ["run_id"],
+      additionalProperties: false,
+    },
+  },
+  complete_dag_run: {
+    name: "complete_dag_run",
+    description: "Complete the expected round of a supervised DAG run whose actors are addressed by stable actor_id only; never expose transient Worker or container IDs.",
+    input_schema: {
+      type: "object",
+      properties: {
+        run_id: { type: "string" },
+        expected_round_id: { type: "string" },
+      },
+      required: ["run_id", "expected_round_id"],
       additionalProperties: false,
     },
   },

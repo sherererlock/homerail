@@ -13,11 +13,13 @@ import {
 } from "../src/manager-agent.js";
 import { buildManagerAgentSystemPrompt } from "../src/manager-agent-prompt.js";
 import {
+  MANAGER_AGENT_COMMON_TOOL_NAMES,
   MANAGER_AGENT_COMMON_VOICE_TOOL_NAMES,
   MANAGER_AGENT_HOST_VOICE_TOOL_NAMES,
   MANAGER_AGENT_WIDGET_FILE_TYPES,
   formatHomeRailPromptHandoff,
   formatHomeRailPromptToolCall,
+  managerAgentDagCommandResult,
   managerAgentCommonToolCatalog,
   managerAgentToolSpec,
   parseHomeRailPromptHandoff,
@@ -146,6 +148,136 @@ describe("Manager Agent harness contract", () => {
     expect(managerAgentToolSpec("write_widget_file").input_schema.properties).toMatchObject({
       widget_type: { type: "string", enum: MANAGER_AGENT_WIDGET_FILE_TYPES },
     });
+  });
+
+  it("declares strict Manager Supervisor tool contracts", () => {
+    const supervisorToolNames = [
+      "start_supervised_dag",
+      "list_dag_actors",
+      "get_dag_supervision",
+      "send_dag_actor_command",
+      "focus_dag_actor",
+      "cancel_dag_run",
+      "complete_dag_run",
+    ] as const;
+    const firstSupervisorTool = MANAGER_AGENT_COMMON_TOOL_NAMES.indexOf("start_supervised_dag");
+
+    expect(MANAGER_AGENT_COMMON_TOOL_NAMES.slice(firstSupervisorTool, firstSupervisorTool + supervisorToolNames.length))
+      .toEqual(supervisorToolNames);
+
+    const expectedSchemas = {
+      start_supervised_dag: {
+        type: "object",
+        properties: {
+          yamlPath: { type: "string" },
+          workflow_id: { type: "string" },
+          workflowId: { type: "string" },
+          profile: { type: "string" },
+          prompt: { type: "string" },
+          runId: { type: "string" },
+        },
+        anyOf: [
+          { required: ["workflow_id"] },
+          { required: ["workflowId"] },
+          { required: ["yamlPath"] },
+        ],
+        additionalProperties: false,
+      },
+      list_dag_actors: {
+        type: "object",
+        properties: { run_id: { type: "string" } },
+        required: ["run_id"],
+        additionalProperties: false,
+      },
+      get_dag_supervision: {
+        type: "object",
+        properties: {
+          run_id: { type: "string" },
+          max_milestones: { type: "integer", minimum: 1, maximum: 12 },
+        },
+        required: ["run_id"],
+        additionalProperties: false,
+      },
+      send_dag_actor_command: {
+        type: "object",
+        properties: {
+          run_id: { type: "string" },
+          actor_id: { type: "string" },
+          expected_round_id: { type: "string" },
+          idempotency_key: { type: "string" },
+          payload: {},
+        },
+        required: ["run_id", "actor_id", "expected_round_id", "idempotency_key", "payload"],
+        additionalProperties: false,
+      },
+      focus_dag_actor: {
+        type: "object",
+        properties: {
+          run_id: { type: "string" },
+          actor_id: { type: "string" },
+          idempotency_key: { type: "string" },
+          duration_ms: { type: "integer", minimum: 1000, maximum: 300000 },
+        },
+        required: ["run_id", "actor_id", "idempotency_key"],
+        additionalProperties: false,
+      },
+      cancel_dag_run: {
+        type: "object",
+        properties: { run_id: { type: "string" } },
+        required: ["run_id"],
+        additionalProperties: false,
+      },
+      complete_dag_run: {
+        type: "object",
+        properties: {
+          run_id: { type: "string" },
+          expected_round_id: { type: "string" },
+        },
+        required: ["run_id", "expected_round_id"],
+        additionalProperties: false,
+      },
+    } as const;
+
+    for (const name of supervisorToolNames) {
+      const spec = managerAgentToolSpec(name);
+      expect(spec.input_schema).toEqual(expectedSchemas[name]);
+      expect(spec.description).toContain("stable actor_id");
+      expect(spec.description).toContain("Worker or container IDs");
+    }
+  });
+
+  it("projects command responses onto the stable Actor-only contract", () => {
+    const result = managerAgentDagCommandResult({
+      success: true,
+      message: "Waiting run resumed",
+      data: {
+        resumed: true,
+        previous_round_id: "round-0001",
+        round_id: "round-0002",
+        ordinal: 2,
+        actor_ids: ["research"],
+        node_ids: ["private-node-research"],
+        command_ids: ["command-research"],
+        ready_node_ids: ["private-node-research"],
+        dispatched: 1,
+        deduplicated: true,
+      },
+    });
+
+    expect(result).toEqual({
+      resumed: true,
+      previous_round_id: "round-0001",
+      round_id: "round-0002",
+      ordinal: 2,
+      actor_ids: ["research"],
+      command_ids: ["command-research"],
+      dispatched: 1,
+      deduplicated: true,
+    });
+    expect(JSON.stringify(result)).not.toContain("node");
+    expect(() => managerAgentDagCommandResult({ data: { resumed: true } })).toThrow(
+      "previous_round_id",
+    );
   });
 
   it("builds shared handlers for all widget-file tools with adapter-backed side effects", async () => {

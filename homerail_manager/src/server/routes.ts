@@ -33,6 +33,9 @@ import {
   isDagLiveSurfaceProjectionNode,
   listDagLiveSurfaceProjections,
 } from "../generative-ui/dag-live-surface-projector.js";
+import {
+  listDagSupervisorActors,
+} from "../runtime/dag-manager-supervisor.js";
 
 interface BaseResponse {
   success: boolean;
@@ -588,6 +591,19 @@ export function inspectionRoutesHandler(
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       json(res, 400, { success: false, message, error: message });
+    }
+    return true;
+  }
+
+  const actorsMatch = pathname.match(/^\/api\/runs\/([^/]+)\/actors$/);
+  if (actorsMatch && req.method === "GET") {
+    try {
+      const runId = decodeURIComponent(actorsMatch[1]);
+      _ok(res, "Logical DAG actors retrieved", listDagSupervisorActors(runId));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("not found")) _notFound(res, message);
+      else json(res, 400, { success: false, message, error: message });
     }
     return true;
   }

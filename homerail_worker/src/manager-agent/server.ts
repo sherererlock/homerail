@@ -18,6 +18,7 @@ import {
   DEFAULT_MANAGER_AGENT_RUNTIME_AGENT_TYPE,
   defaultPrReviewBudgetKey,
   isFullGitRevision,
+  managerAgentDagCommandResult,
   managerAgentToolSpec,
   managerAgentPluginOwnedLegacyWidgetType,
   managerAgentPluginSkillSnapshot,
@@ -208,13 +209,41 @@ function compactDeltas(parts: string[]): string {
   return parts.join("").trim();
 }
 
+function canonicalToolCallName(value: string): string {
+  const name = value.trim();
+  if (!name.startsWith("mcp__")) return name;
+  const parts = name.split("__").filter(Boolean);
+  return parts.length >= 3 ? parts.at(-1)! : name;
+}
+
 function normalizeRequiredToolCalls(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return Array.from(new Set(
     value
-      .map((item) => typeof item === "string" ? item.trim() : "")
+      .map((item) => typeof item === "string" ? canonicalToolCallName(item) : "")
       .filter(Boolean),
   ));
+}
+
+function successfulToolCallNames(
+  objectiveToolCalls: Array<{ name: string; success: boolean }>,
+  toolCalls: ToolTrace[],
+  toolResults: ToolResultTrace[],
+): Set<string> {
+  const successful = new Set(
+    objectiveToolCalls
+      .filter((item) => item.success)
+      .map((item) => canonicalToolCallName(item.name)),
+  );
+  const successfulResultIds = new Set(
+    toolResults
+      .filter((result) => result.is_error !== true)
+      .map((result) => result.tool_use_id),
+  );
+  for (const call of toolCalls) {
+    if (successfulResultIds.has(call.id)) successful.add(canonicalToolCallName(call.name));
+  }
+  return successful;
 }
 
 function managerRestUrl(): string {
@@ -534,6 +563,18 @@ function managerData(body: unknown): Record<string, unknown> {
       : record;
   }
   return {};
+}
+
+function appendSupervisionCommentary(voiceSurface: VoiceSurfaceState, body: unknown): void {
+  const data = managerData(body);
+  const digest = data.milestone_digest && typeof data.milestone_digest === "object" && !Array.isArray(data.milestone_digest)
+    ? data.milestone_digest as Record<string, unknown>
+    : undefined;
+  const commentary = Array.isArray(digest?.commentary) ? digest.commentary : [];
+  for (const item of commentary) {
+    const text = typeof item === "string" ? item.trim() : "";
+    if (text && !voiceSurface.commentaryTexts.includes(text)) voiceSurface.commentaryTexts.push(text);
+  }
 }
 
 function dataRecord(body: unknown): Record<string, unknown> {
@@ -1063,6 +1104,186 @@ export function createManagerTools(state: {
       },
     },
     {
+      ...managerAgentToolSpec("start_supervised_dag"),
+      async handler(args) {
+        const yamlPath = typeof args.yamlPath === "string" ? args.yamlPath.trim() : "";
+        const workflowId = typeof args.workflow_id === "string" && args.workflow_id.trim()
+          ? args.workflow_id.trim()
+          : typeof args.workflowId === "string" && args.workflowId.trim()
+            ? args.workflowId.trim()
+            : "";
+        if (!yamlPath && !workflowId) {
+          throw new Error("start_supervised_dag requires yamlPath or workflow_id");
+        }
+        try {
+          const body = await requestManager("/runs/create-and-run", {
+            method: "POST",
+            body: JSON.stringify({
+              yamlPath: yamlPath || undefined,
+              workflow_id: workflowId || undefined,
+              profile: typeof args.profile === "string" ? args.profile : undefined,
+              prompt: typeof args.prompt === "string" ? args.prompt : undefined,
+              runId: typeof args.runId === "string" ? args.runId : undefined,
+            }),
+          }) as Record<string, unknown>;
+          const data = body.data as Record<string, unknown> | undefined;
+          const runId = String(data?.runId ?? data?.run_id ?? "");
+          if (!runId) throw new Error("Manager did not return a supervised DAG run id");
+          state.createdRunIds.push(runId);
+          state.objectiveToolCalls.push({ name: "start_supervised_dag", success: true });
+          return { content: [{ type: "text", text: short(body, 12000) }] };
+        } catch (err) {
+          state.objectiveToolCalls.push({
+            name: "start_supervised_dag",
+            success: false,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          throw err;
+        }
+      },
+    },
+    {
+      ...managerAgentToolSpec("list_dag_actors"),
+      async handler(args) {
+        const runId = String(args.run_id ?? "").trim();
+        if (!runId) throw new Error("list_dag_actors requires run_id");
+        const body = await requestManager(`/runs/${encodeURIComponent(runId)}/actors`);
+        return { content: [{ type: "text", text: short(body, 24000) }] };
+      },
+    },
+    {
+      ...managerAgentToolSpec("get_dag_supervision"),
+      async handler(args) {
+        const runId = String(args.run_id ?? "").trim();
+        if (!runId) throw new Error("get_dag_supervision requires run_id");
+        const consumerId = state.sessionId?.trim();
+        if (!consumerId) throw new Error("get_dag_supervision requires a bound manager session");
+        const body = await requestManager(
+          `/runs/${encodeURIComponent(runId)}/supervision`,
+          {
+            method: "POST",
+            body: JSON.stringify({
+              consumer_id: consumerId,
+              max_milestones: args.max_milestones,
+            }),
+          },
+        );
+        appendSupervisionCommentary(state.voiceSurface, body);
+        return { content: [{ type: "text", text: short(body, 40000) }] };
+      },
+    },
+    {
+      ...managerAgentToolSpec("send_dag_actor_command"),
+      async handler(args) {
+        const runId = String(args.run_id ?? "").trim();
+        const actorId = String(args.actor_id ?? "").trim();
+        const expectedRoundId = String(args.expected_round_id ?? "").trim();
+        const idempotencyKey = String(args.idempotency_key ?? "").trim();
+        if (!runId || !actorId || !expectedRoundId || !idempotencyKey) {
+          throw new Error("send_dag_actor_command requires run_id, actor_id, expected_round_id, and idempotency_key");
+        }
+        if (!("payload" in args)) throw new Error("send_dag_actor_command requires payload");
+        try {
+          const body = await requestManager(`/runs/${encodeURIComponent(runId)}/commands`, {
+            method: "POST",
+            body: JSON.stringify({
+              expected_round_id: expectedRoundId,
+              commands: [{
+                actor_id: actorId,
+                payload: args.payload,
+                idempotency_key: idempotencyKey,
+              }],
+            }),
+          });
+          const result = managerAgentDagCommandResult(body);
+          state.objectiveToolCalls.push({ name: "send_dag_actor_command", success: true });
+          return { content: [{ type: "text", text: short(result, 20000) }] };
+        } catch (error) {
+          state.objectiveToolCalls.push({
+            name: "send_dag_actor_command",
+            success: false,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          throw error;
+        }
+      },
+    },
+    {
+      ...managerAgentToolSpec("focus_dag_actor"),
+      async handler(args) {
+        const runId = String(args.run_id ?? "").trim();
+        const actorId = String(args.actor_id ?? "").trim();
+        const idempotencyKey = String(args.idempotency_key ?? "").trim();
+        if (!runId || !actorId || !idempotencyKey) {
+          throw new Error("focus_dag_actor requires run_id, actor_id, and idempotency_key");
+        }
+        try {
+          const body = await requestManager(`/runs/${encodeURIComponent(runId)}/focus`, {
+            method: "POST",
+            body: JSON.stringify({
+              actor_id: actorId,
+              idempotency_key: idempotencyKey,
+              duration_ms: args.duration_ms,
+            }),
+          });
+          state.objectiveToolCalls.push({ name: "focus_dag_actor", success: true });
+          return { content: [{ type: "text", text: short(body, 12000) }] };
+        } catch (error) {
+          state.objectiveToolCalls.push({
+            name: "focus_dag_actor",
+            success: false,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          throw error;
+        }
+      },
+    },
+    {
+      ...managerAgentToolSpec("cancel_dag_run"),
+      async handler(args) {
+        const runId = String(args.run_id ?? "").trim();
+        if (!runId) throw new Error("cancel_dag_run requires run_id");
+        try {
+          const body = await requestManager(`/runs/${encodeURIComponent(runId)}/cancel`, {
+            method: "POST",
+            body: "{}",
+          });
+          state.objectiveToolCalls.push({ name: "cancel_dag_run", success: true });
+          return { content: [{ type: "text", text: short(body, 12000) }] };
+        } catch (error) {
+          state.objectiveToolCalls.push({
+            name: "cancel_dag_run",
+            success: false,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          throw error;
+        }
+      },
+    },
+    {
+      ...managerAgentToolSpec("complete_dag_run"),
+      async handler(args) {
+        const runId = String(args.run_id ?? "").trim();
+        const expectedRoundId = String(args.expected_round_id ?? "").trim();
+        if (!runId || !expectedRoundId) throw new Error("complete_dag_run requires run_id and expected_round_id");
+        try {
+          const body = await requestManager(`/runs/${encodeURIComponent(runId)}/complete`, {
+            method: "POST",
+            body: JSON.stringify({ expected_round_id: expectedRoundId }),
+          });
+          state.objectiveToolCalls.push({ name: "complete_dag_run", success: true });
+          return { content: [{ type: "text", text: short(body, 12000) }] };
+        } catch (error) {
+          state.objectiveToolCalls.push({
+            name: "complete_dag_run",
+            success: false,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          throw error;
+        }
+      },
+    },
+    {
       name: "invoke_run",
       description: "Invoke or tick an existing DAG run.",
       input_schema: {
@@ -1567,9 +1788,12 @@ async function handleChat(body: ChatRequest): Promise<Record<string, unknown>> {
       run_ids: state.createdRunIds,
     });
   }
-  const missingRequiredToolCalls = requiredToolCalls.filter((name) =>
-    !state.objectiveToolCalls.some((item) => item.name === name && item.success)
+  const successfulRequiredToolCalls = successfulToolCallNames(
+    state.objectiveToolCalls,
+    toolCalls,
+    toolResults,
   );
+  const missingRequiredToolCalls = requiredToolCalls.filter((name) => !successfulRequiredToolCalls.has(name));
   if (missingRequiredToolCalls.length > 0) {
     throw new ManagerAgentObjectiveUnsatisfiedError({
       required_tool_calls: requiredToolCalls,
@@ -1615,7 +1839,7 @@ async function handleChat(body: ChatRequest): Promise<Record<string, unknown>> {
       tool_calls: state.objectiveToolCalls,
       satisfied: requiredToolCalls.length === 0
         ? state.objectiveToolCalls.length === 0 || state.objectiveToolCalls.some((item) => item.success)
-        : requiredToolCalls.every((name) => state.objectiveToolCalls.some((item) => item.name === name && item.success)),
+        : missingRequiredToolCalls.length === 0,
     },
     effective_config: {
       harness: normalizeManagerAgentRuntimeAgentType(config.agent_type),

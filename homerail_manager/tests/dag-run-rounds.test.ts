@@ -116,16 +116,18 @@ describe("DAG run round persistence", () => {
   });
 
   it("migrates v20 actor commands without data loss and tolerates reserved v21/v22 markers", () => {
-    registerActor();
-    for (const commandId of ["pending", "delivered", "claimed", "acknowledged", "failed"]) {
-      createCommand(commandId);
-    }
-    markDagActorCommandDelivered("delivered");
-    claimDagActorCommand({ command_id: "claimed", run_id: "run-1", actor_id: "researcher", generation: 1 });
-    claimDagActorCommand({ command_id: "acknowledged", run_id: "run-1", actor_id: "researcher", generation: 1 });
-    acknowledgeDagActorCommand({ command_id: "acknowledged", generation: 1 });
-    claimDagActorCommand({ command_id: "failed", run_id: "run-1", actor_id: "researcher", generation: 1 });
-    failDagActorCommand({ command_id: "failed", generation: 1, failure: { message: "expected" } });
+    getDb().transaction(() => {
+      registerActor();
+      for (const commandId of ["pending", "delivered", "claimed", "acknowledged", "failed"]) {
+        createCommand(commandId);
+      }
+      markDagActorCommandDelivered("delivered");
+      claimDagActorCommand({ command_id: "claimed", run_id: "run-1", actor_id: "researcher", generation: 1 });
+      claimDagActorCommand({ command_id: "acknowledged", run_id: "run-1", actor_id: "researcher", generation: 1 });
+      acknowledgeDagActorCommand({ command_id: "acknowledged", generation: 1 });
+      claimDagActorCommand({ command_id: "failed", run_id: "run-1", actor_id: "researcher", generation: 1 });
+      failDagActorCommand({ command_id: "failed", generation: 1, failure: { message: "expected" } });
+    }).immediate();
 
     const expectedRows = getDb().prepare("SELECT * FROM dag_actor_commands ORDER BY command_id").all();
     downgradeActorCommandsToV20();
@@ -133,7 +135,7 @@ describe("DAG run round persistence", () => {
 
     const migrated = getDb();
     expect(migrated.prepare("SELECT version FROM schema_migrations WHERE version >= 21 ORDER BY version").all())
-      .toEqual([{ version: 21 }, { version: 22 }, { version: 23 }, { version: 24 }]);
+      .toEqual([{ version: 21 }, { version: 22 }, { version: 23 }, { version: 24 }, { version: 25 }]);
     expect(migrated.prepare("SELECT * FROM dag_actor_commands ORDER BY command_id").all())
       .toEqual(expectedRows);
     expect(migrated.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
