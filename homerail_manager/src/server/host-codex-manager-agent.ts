@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline";
 import { ensureDefaultWorkspacePath, getHomerailHome } from "../config/env.js";
-import { resolveAssetRoot } from "../assets/root.js";
+import { resolveAssetDirectory } from "../assets/root.js";
 import { codexBinaryNotFoundMessage, resolveCodexBinary } from "./codex-binary.js";
 import {
   readWidgetFile,
@@ -19,19 +19,24 @@ import {
 import type { ManagerAgentRuntimeConfig } from "./manager-agent-container.js";
 import {
   buildManagerAgentSystemPrompt,
+  canonicalManagerAgentToolCallName,
   createManagerAgentWidgetFileTools,
   DEFAULT_PR_REVIEW_EXPECTED_USAGE,
   defaultPrReviewBudgetKey,
   isFullGitRevision,
   managerAgentDagCommandResult,
+  managerAgentDagContextPrompt,
   managerAgentToolSpec,
   managerAgentPluginOwnedLegacyWidgetType,
   managerAgentPluginSkillSnapshot,
+  managerAgentRequiredToolObjectivePrompt,
   managerAgentSkillViewToolDefinitions,
   matchingManagerAgentSkillViewToolDefinition,
   materializeManagerAgentSkillViewInput,
   mergeManagerAgentPluginSkillCatalog,
+  normalizeManagerAgentDagActorCommandInput,
   normalizeManagerAgentDagActorInterventionInput,
+  normalizeManagerAgentRequiredToolCalls,
   executeHomerailPluginTool,
   homerailPluginTurnContextDigestInput,
   resolvePrCloseout,
@@ -42,6 +47,7 @@ import {
   type ManagerAgentToolName,
   type ManagerAgentReasoningEffort,
   type ManagerAgentPromptSkill,
+  type ManagerAgentDagContextV1,
   type GenerativeUiCanvasContextV1,
   type HomerailPluginTurnContextV1,
   type HomerailPluginToolExecutionEnvelopeV1,
@@ -170,6 +176,7 @@ export interface HostCodexManagerAgentInput {
   continue_chat?: boolean;
   history?: Array<{ role?: string; content?: string; timestamp?: string }>;
   canvas_context?: GenerativeUiCanvasContextV1;
+  dag_context?: ManagerAgentDagContextV1;
   required_tool_calls?: string[];
   agent_config: ManagerAgentRuntimeConfig;
   managerRestUrl?: string | (() => string);
@@ -851,8 +858,7 @@ export function createManagerTools(state: {
     {
       ...managerAgentToolSpec("list_orchestrations"),
       async handler() {
-        const resolution = resolveAssetRoot();
-        const dir = path.join(resolution.assetRoot, "orchestrations");
+        const dir = resolveAssetDirectory("orchestrations");
         const files = fs.existsSync(dir)
           ? fs.readdirSync(dir).filter((name) =>
             name.endsWith(".yaml") ||
@@ -1304,6 +1310,7 @@ export function createManagerTools(state: {
             state.voiceSurface.commentaryTexts.push(text);
           }
         }
+        state.objectiveToolCalls.push({ name: "get_dag_supervision", success: true });
         return { content: [{ type: "text", text: short(body, 40000) }] };
       },
     },
@@ -1334,22 +1341,19 @@ export function createManagerTools(state: {
     {
       ...managerAgentToolSpec("send_dag_actor_command"),
       async handler(args) {
-        const runId = String(args.run_id ?? "").trim();
-        const actorId = String(args.actor_id ?? "").trim();
-        const expectedRoundId = String(args.expected_round_id ?? "").trim();
-        const idempotencyKey = String(args.idempotency_key ?? "").trim();
-        if (!runId || !actorId || !expectedRoundId || !idempotencyKey) {
-          throw new Error("send_dag_actor_command requires run_id, actor_id, expected_round_id, and idempotency_key");
-        }
-        if (!("payload" in args)) throw new Error("send_dag_actor_command requires payload");
+        const input = normalizeManagerAgentDagActorCommandInput(args);
         try {
-          const body = await requestManager(state.restUrl, `/runs/${encodeURIComponent(runId)}/commands`, {
+          const body = await requestManager(
+            state.restUrl,
+            `/runs/${encodeURIComponent(input.run_id)}/commands`,
+            {
             method: "POST",
             body: JSON.stringify({
-              expected_round_id: expectedRoundId,
-              commands: [{ actor_id: actorId, idempotency_key: idempotencyKey, payload: args.payload }],
+                expected_round_id: input.expected_round_id,
+                commands: input.commands,
             }),
-          });
+            },
+          );
           const result = managerAgentDagCommandResult(body);
           state.objectiveToolCalls.push({ name: "send_dag_actor_command", success: true });
           return { content: [{ type: "text", text: short(result, 20000) }] };
@@ -1966,6 +1970,7 @@ function buildPrompt(
   message: string,
   continueChat: boolean,
   canvasContext?: GenerativeUiCanvasContextV1,
+  dagContext?: ManagerAgentDagContextV1,
 ): string {
   const normalizedHistory = continueChat && Array.isArray(history)
     ? history
@@ -1987,6 +1992,8 @@ function buildPrompt(
       JSON.stringify(canvasContext),
     ].join("\n"));
   }
+  const dagContextPrompt = managerAgentDagContextPrompt(dagContext);
+  if (dagContextPrompt) sections.push(dagContextPrompt);
   sections.push(`New user message:\n${message}`);
   return sections.join("\n\n");
 }
@@ -1996,33 +2003,19 @@ export function _buildManagerAgentPromptForTest(input: {
   message: string;
   continue_chat?: boolean;
   canvas_context?: GenerativeUiCanvasContextV1;
+  dag_context?: ManagerAgentDagContextV1;
 }): string {
   return buildPrompt(
     input.history,
     input.message,
     input.continue_chat !== false,
     input.canvas_context,
+    input.dag_context,
   );
 }
 
 function compactDeltas(parts: string[]): string {
   return parts.join("").trim();
-}
-
-function canonicalToolCallName(value: string): string {
-  const name = value.trim();
-  if (!name.startsWith("mcp__")) return name;
-  const parts = name.split("__").filter(Boolean);
-  return parts.length >= 3 ? parts.at(-1)! : name;
-}
-
-function normalizeRequiredToolCalls(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  return Array.from(new Set(
-    value
-      .map((item) => typeof item === "string" ? canonicalToolCallName(item) : "")
-      .filter(Boolean),
-  ));
 }
 
 function successfulToolCallNames(
@@ -2033,7 +2026,7 @@ function successfulToolCallNames(
   const successful = new Set(
     objectiveToolCalls
       .filter((item) => item.success)
-      .map((item) => canonicalToolCallName(item.name)),
+      .map((item) => canonicalManagerAgentToolCallName(item.name)),
   );
   const successfulResultIds = new Set(
     toolResults
@@ -2041,7 +2034,7 @@ function successfulToolCallNames(
       .map((result) => result.tool_use_id),
   );
   for (const call of toolCalls) {
-    if (successfulResultIds.has(call.id)) successful.add(canonicalToolCallName(call.name));
+    if (successfulResultIds.has(call.id)) successful.add(canonicalManagerAgentToolCallName(call.name));
   }
   return successful;
 }
@@ -2069,7 +2062,7 @@ function buildHostCodexManagerAgentResult(
   agentErrors: string[],
 ): Record<string, unknown> {
   const config = input.agent_config;
-  const requiredToolCalls = normalizeRequiredToolCalls(input.required_tool_calls);
+  const requiredToolCalls = normalizeManagerAgentRequiredToolCalls(input.required_tool_calls);
   const successfulRequiredToolCalls = successfulToolCallNames(
     state.objectiveToolCalls,
     toolCalls,
@@ -2170,6 +2163,7 @@ async function* runHostCodexManagerAgentTurnEvents(
   const texts: string[] = [];
   const commentaryTexts: string[] = [];
   const agentErrors: string[] = [];
+  const requiredToolCalls = normalizeManagerAgentRequiredToolCalls(input.required_tool_calls);
   let emittedVoiceSurfaceCommentaryCount = 0;
   const abortController = new AbortController();
   const turnTimeoutMs = managerAgentTurnTimeoutMs();
@@ -2180,6 +2174,7 @@ async function* runHostCodexManagerAgentTurnEvents(
     message,
     input.continue_chat !== false,
     input.canvas_context,
+    input.dag_context,
   );
   const tools = createManagerTools(
     state,
@@ -2190,7 +2185,10 @@ async function* runHostCodexManagerAgentTurnEvents(
     input.manager_skills,
   );
   const context: AgentRunContext = {
-    systemPrompt: systemPrompt(config, responseMode, voiceUiRules, voiceSystemContract, input.manager_skills),
+    systemPrompt: [
+      systemPrompt(config, responseMode, voiceUiRules, voiceSystemContract, input.manager_skills),
+      managerAgentRequiredToolObjectivePrompt(requiredToolCalls),
+    ].filter(Boolean).join("\n\n"),
     provider: config.provider_name || undefined,
     model: config.model || "codex",
     apiKey: config.api_key || "",

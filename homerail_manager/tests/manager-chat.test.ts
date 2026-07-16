@@ -167,8 +167,17 @@ describe("/api/manager/chat", () => {
         session_id: body.session_id,
         run_id: "run-container-123",
         run_ids: ["run-container-123"],
-        objective: { required: false, satisfied: true, tool_calls: [{ name: "create_and_run", success: true }] },
-        tool_calls: [{ id: "tool-1", name: "create_and_run", input: { yamlPath: "assets/orchestrations/test.yaml" } }],
+        objective: {
+          required: true,
+          required_tool_calls: ["create_and_run"],
+          satisfied: true,
+          tool_calls: [{ name: "create_and_run", success: true }],
+        },
+        tool_calls: [{
+          id: "tool-1",
+          name: "mcp__dag-tools__create_and_run",
+          input: { yamlPath: "assets/orchestrations/test.yaml" },
+        }],
         tool_results: [{ tool_use_id: "tool-1", content: "ok" }],
       };
     });
@@ -208,6 +217,7 @@ describe("/api/manager/chat", () => {
         body: JSON.stringify({
           message: "启动一个非 Codex Manager Agent 验证",
           project_id: projectId,
+          required_tool_calls: ["create_and_run"],
         }),
       });
       const body = await response.json() as {
@@ -218,7 +228,8 @@ describe("/api/manager/chat", () => {
           run_ids: string[];
           worker_id: string;
           container_name: string;
-          tool_calls: Array<{ name: string }>;
+          tool_calls: Array<{ name: string; runtime_name?: string }>;
+          objective: { required: boolean; required_tool_calls: string[]; satisfied: boolean };
           manager_agent_config: { agent_type: string; provider_name: string; model: string; base_url: string };
         };
       };
@@ -230,7 +241,15 @@ describe("/api/manager/chat", () => {
       expect(body.data.run_ids).toEqual(["run-container-123"]);
       expect(body.data.worker_id).toBe("manager-agent-container-test");
       expect(body.data.container_name).toBe(`homerail-manager-agent-${projectId}`);
-      expect(body.data.tool_calls).toContainEqual(expect.objectContaining({ name: "create_and_run" }));
+      expect(body.data.tool_calls).toContainEqual(expect.objectContaining({
+        name: "create_and_run",
+        runtime_name: "mcp__dag-tools__create_and_run",
+      }));
+      expect(body.data.objective).toMatchObject({
+        required: true,
+        required_tool_calls: ["create_and_run"],
+        satisfied: true,
+      });
       expect(body.data.manager_agent_config).toMatchObject({
         agent_type: "claude-sdk",
         provider_name: "qwen36",
@@ -241,6 +260,7 @@ describe("/api/manager/chat", () => {
       expect(observedChatBodies[0]).toMatchObject({
         message: "启动一个非 Codex Manager Agent 验证",
         project_id: projectId,
+        required_tool_calls: ["create_and_run"],
         agent_config: {
           agent_type: "claude-sdk",
           provider_name: "qwen36",
@@ -1112,7 +1132,8 @@ describe("/api/manager/chat", () => {
     expect(response.status).toBe(200);
     expect(body.success).toBe(true);
     expect(body.data.tool_calls).toContainEqual(expect.objectContaining({
-      name: "mcp__homerail-tools__list_orchestrations",
+      name: "list_orchestrations",
+      runtime_name: "mcp__homerail-tools__list_orchestrations",
     }));
   });
 
@@ -1200,6 +1221,50 @@ describe("/api/manager/chat", () => {
       project_id: "p-host-codex-error",
     });
     expect(JSON.stringify(body)).not.toContain("[ERROR]");
+  });
+
+  it("injects and enforces explicit required tool objectives on host Codex", async () => {
+    let seenSystemPrompt = "";
+    _setHostCodexAgentEventRunnerForTest(async function* (_prompt, _tools, context) {
+      seenSystemPrompt = context.systemPrompt ?? "";
+      yield { type: "text", text: "I will start it later." };
+      yield { type: "done" };
+    });
+    const port = await listen(server);
+    const baseUrl = `http://127.0.0.1:${port}`;
+    const saved = await fetch(`${baseUrl}/api/manager-agent/config`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ harness: "codex_appserver", model_name: "gpt-5.5" }),
+    });
+    expect(saved.status).toBe(200);
+
+    const response = await fetch(`${baseUrl}/api/manager/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: "Start the explicitly selected workflow.",
+        project_id: "p-host-codex-objective",
+        required_tool_calls: ["start_supervised_dag"],
+      }),
+    });
+    const body = await response.json() as {
+      success: boolean;
+      data?: Record<string, unknown>;
+    };
+
+    expect(response.status).toBe(503);
+    expect(body.success).toBe(false);
+    expect(body.data).toMatchObject({
+      code: "required_tool_calls_unsatisfied",
+      required_tool_calls: ["start_supervised_dag"],
+      missing_tool_calls: ["start_supervised_dag"],
+      observed_tool_calls: [],
+      objective_tool_calls: [],
+    });
+    expect(seenSystemPrompt).toContain("Successfully call every required tool");
+    expect(seenSystemPrompt).toContain("start_supervised_dag");
+    expect(seenSystemPrompt).not.toMatch(/game|showcase|three-worker/i);
   });
 
   it("normalizes container-only manager URLs for host Codex tools", () => {

@@ -179,6 +179,7 @@ export class DagActorInterventionRuntimeError extends Error {
       | "actor_not_found"
       | "actor_retired"
       | "state_token_conflict"
+      | "command_fence_missing"
       | "intervention_recovery_failed",
     message: string,
   ) {
@@ -435,7 +436,11 @@ function _logicalActorId(node: DAGGraphNode): string {
 }
 
 function _logicalActorRole(node: DAGGraphNode): string {
-  return _runtimeString(node, "role") ?? node.agent ?? node.name ?? node.node_id;
+  return _runtimeString(node, "role")
+    ?? (typeof node.description === "string" && node.description.trim() ? node.description.trim() : undefined)
+    ?? node.agent
+    ?? node.name
+    ?? node.node_id;
 }
 
 function _logicalActorSurface(node: DAGGraphNode, actorId: string): string {
@@ -1568,6 +1573,16 @@ export function failActiveRun(runId: string, nodeId: string, reason: string): Ac
   writeRunMetadata(runId, serializeRunMetadata(run));
   _emitNodeStateChanges(run, before);
   emit("dag:node_failed", { runId, nodeId, reason });
+  const isDynamicFanoutChild = node?.extra?.dynamic_fanout !== undefined;
+  const terminalFailureRoute = !isDynamicFanoutChild && run.dagRun.graph.edges.some((edge) =>
+    edge.from_node === nodeId &&
+    edge.to_node === "" &&
+    (edge.terminal_outcome === "failure" ||
+      (edge.terminal_outcome === undefined && isFailurePort(edge.from_port)))
+  );
+  if (terminalFailureRoute) {
+    return abortActiveRun(runId, reason);
+  }
   if (node) {
     _recordFanoutChild(run, node, "failed", {
       status: "failed",
@@ -1604,12 +1619,26 @@ function _correctionPrompt(
   attempt: number,
   maxAttempts: number,
   outputPorts: string[],
+  successPorts: string[],
+  failurePorts: string[],
+  outputContracts: Record<string, { contract: string; schema: unknown }>,
 ): string {
   const declaredPorts = outputPorts.length > 0 ? outputPorts.join(", ") : "done";
+  const contractGuidance = Object.keys(outputContracts).length > 0
+    ? [
+        "The handoff tool call shape is {\"port\":\"<declared port>\",\"content\":<value matching that port schema>}. Put contract fields only inside content.",
+        `Exact output contracts by port (JSON Schema): ${JSON.stringify(outputContracts)}`,
+      ]
+    : [];
   return [
     `Correction attempt ${attempt}/${maxAttempts} for DAG node ${nodeId}.`,
     `Previous attempt ended without a valid DAG handoff: ${reason}`,
     `Declared output ports for this node: ${declaredPorts}.`,
+    `Preferred success ports: ${successPorts.length > 0 ? successPorts.join(", ") : "none declared"}.`,
+    `Failure ports: ${failurePorts.length > 0 ? failurePorts.join(", ") : "none declared"}.`,
+    ...contractGuidance,
+    "A contract or transport error from the previous attempt is not a failure of the original task. Retry a preferred success port when the original work is complete.",
+    "Use a failure port only when the original task itself cannot complete; never use it merely to report this correction error.",
     "Treat that error as authoritative. Preserve required field names and JSON array/object/number types exactly.",
     "Reuse completed evidence when it is available in the original inputs or current workspace.",
     "Correction mode permits only the handoff tool. Do not repeat investigation, file changes, or other side effects.",
@@ -1636,16 +1665,35 @@ export function requestNodeCorrection(
 
   const before = _snapshotNodeStates(run);
   const attempt = previousAttempts + 1;
-  const outputPorts = Array.from(new Set(
-    run.dagRun.graph.edges
-      .filter((edge) => edge.from_node === nodeId && edge.label !== "after_dep")
-      .map((edge) => edge.from_port),
-  )).sort();
+  const outputEdges = run.dagRun.graph.edges
+    .filter((edge) => edge.from_node === nodeId && edge.label !== "after_dep");
+  const outputPorts = Array.from(new Set(outputEdges.map((edge) => edge.from_port))).sort();
+  const successPorts = Array.from(new Set(outputEdges
+    .filter((edge) => edge.condition !== "on_failure" && !isFailurePort(edge.from_port))
+    .map((edge) => edge.from_port))).sort();
+  const failurePorts = Array.from(new Set(outputEdges
+    .filter((edge) => edge.condition === "on_failure" || isFailurePort(edge.from_port))
+    .map((edge) => edge.from_port))).sort();
+  const outputContracts = Object.fromEntries(outputPorts.flatMap((port) => {
+    const contract = _outputContract(run, nodeId, port);
+    return contract?.schema !== undefined
+      ? [[port, { contract: contract.contract, schema: contract.schema }] as const]
+      : [];
+  }));
   run.counters.corrections[nodeId] = attempt;
   const mailbox = run.dagRun.mailboxes.get(nodeId);
   if (mailbox) {
     const values = mailbox.get("correction") ?? [];
-    values.push(_correctionPrompt(nodeId, reason, attempt, maxAttempts, outputPorts));
+    values.push(_correctionPrompt(
+      nodeId,
+      reason,
+      attempt,
+      maxAttempts,
+      outputPorts,
+      successPorts,
+      failurePorts,
+      outputContracts,
+    ));
     mailbox.set("correction", values);
   }
   resetSkippedSuccessDescendants(run.dagRun, nodeId);
@@ -2142,12 +2190,11 @@ export function expireWaitingActiveRuns(now = Date.now()): string[] {
   return expired.sort();
 }
 
-function _handoffContractViolation(
+function _outputContract(
   run: ActiveRun,
   fromNode: string,
   port: string,
-  content: unknown,
-): string | undefined {
+): { contract: string; schema?: unknown } | undefined {
   const node = run.dagRun.graph.nodes.find((candidate) => candidate.node_id === fromNode);
   const workflowSpec = node?.extra?.workflow_spec_v1;
   if (!workflowSpec || typeof workflowSpec !== "object" || Array.isArray(workflowSpec)) return undefined;
@@ -2156,7 +2203,21 @@ function _handoffContractViolation(
   const contractName = (outputContracts as Record<string, unknown>)[port];
   if (typeof contractName !== "string" || !contractName) return undefined;
   const schema = run.contracts?.[contractName];
-  if (!schema) return `DAG_HANDOFF_CONTRACT_VIOLATION ${fromNode}.${port}: contract '${contractName}' is missing`;
+  return { contract: contractName, ...(schema !== undefined ? { schema } : {}) };
+}
+
+function _handoffContractViolation(
+  run: ActiveRun,
+  fromNode: string,
+  port: string,
+  content: unknown,
+): string | undefined {
+  const outputContract = _outputContract(run, fromNode, port);
+  if (!outputContract) return undefined;
+  const { contract: contractName, schema } = outputContract;
+  if (schema === undefined) {
+    return `DAG_HANDOFF_CONTRACT_VIOLATION ${fromNode}.${port}: contract '${contractName}' is missing`;
+  }
   const validation = validateJsonContract(schema, content);
   if (validation.valid) return undefined;
   return `DAG_HANDOFF_CONTRACT_VIOLATION ${fromNode}.${port} (${contractName}): ${validation.details}`;
@@ -2376,6 +2437,19 @@ function _interventionInstruction(intervention: DagActorInterventionRecord): str
   }
 }
 
+function _interventionCommandIdentity(
+  intervention: DagActorInterventionRecord,
+  generation: number,
+): { command_id: string; idempotency_key: string } {
+  const digest = createHash("sha256")
+    .update(`${intervention.intervention_id}\0${generation}`)
+    .digest("hex");
+  return {
+    command_id: `command-${digest}`,
+    idempotency_key: `intervention-${digest}`,
+  };
+}
+
 function _interventionResult(
   intervention: DagActorInterventionRecord,
   deduplicated: boolean,
@@ -2539,6 +2613,25 @@ function _applyPersistedDagActorIntervention(
         );
       }
 
+      const sourceCommand = listDagActorCommands({
+        run_id: current.run_id,
+        actor_id: current.actor_id,
+        round_id: run.currentRound.round_id,
+      }).find((command) => (
+        command.target_generation === current.generation
+        && command.status !== "cancelled"
+        && command.status !== "failed"
+      ));
+      const resumesActor = applying.operation === "retry"
+        || applying.operation === "reassign"
+        || applying.operation === "checkpoint_fork";
+      if (resumesActor && run.currentRound.ordinal > 1 && !sourceCommand) {
+        throw new DagActorInterventionRuntimeError(
+          "command_fence_missing",
+          `DAG actor ${current.run_id}/${current.actor_id} has no current-round command to supersede`,
+        );
+      }
+
       cancelUnclaimedDagActorCommands({
         run_id: current.run_id,
         actor_id: current.actor_id,
@@ -2566,6 +2659,25 @@ function _applyPersistedDagActorIntervention(
         checkpoint_ref: `portable:${checkpoint.checkpoint_version}`,
       });
       _persistNodeSession(run, nextActor.node_id, nextSession);
+
+      if (resumesActor && sourceCommand) {
+        const identity = _interventionCommandIdentity(applying, nextActor.generation);
+        createDagActorCommand({
+          ...identity,
+          run_id: nextActor.run_id,
+          actor_id: nextActor.actor_id,
+          round_id: run.currentRound.round_id,
+          target_generation: nextActor.generation,
+          payload: {
+            kind: "actor_intervention",
+            intervention_id: applying.intervention_id,
+            operation: applying.operation,
+            instruction: _interventionInstruction(applying),
+            source_command_id: sourceCommand.command_id,
+            source_payload: sourceCommand.payload,
+          },
+        });
+      }
 
       if (applying.operation === "interrupt" || applying.operation === "cancel") {
         failNode(run.dagRun, nextActor.node_id, {
@@ -2883,6 +2995,27 @@ function _roundCarryoverInputs(
 ): Map<string, Array<{ fromNode: string; port: string; value: unknown }>> {
   const handoffs = loadRunSnapshot(run.runId)?.handoffs ?? [];
   const carryover = new Map<string, Array<{ fromNode: string; port: string; value: unknown }>>();
+  const initialPrompt = run.initialPrompt;
+  if (initialPrompt !== undefined && initialPrompt.trim().length > 0) {
+    const payload = _structuredGatewayValue(initialPrompt);
+    const targets = run.runInputTargets && run.runInputTargets.length > 0
+      ? run.runInputTargets
+      : run.dagRun.graph.nodes
+        .filter((node) => !run.dagRun.graph.edges.some((edge) =>
+          edge.to_node === node.node_id && edge.label === "after_dep"
+        ))
+        .map((node) => ({ node: node.node_id, port: "prompt" }));
+    for (const target of targets) {
+      if (!resetNodeIds.has(target.node)) continue;
+      const inputs = carryover.get(target.node) ?? [];
+      inputs.push({
+        fromNode: "$run.input",
+        port: target.port,
+        value: structuredClone(payload),
+      });
+      carryover.set(target.node, inputs);
+    }
+  }
   for (const edge of run.dagRun.graph.edges) {
     if (!edge.to_node || edge.label === "after_dep" || !resetNodeIds.has(edge.to_node) || resetNodeIds.has(edge.from_node)) {
       continue;
@@ -2901,6 +3034,15 @@ function _roundCarryoverInputs(
     carryover.set(edge.to_node, inputs);
   }
   return carryover;
+}
+
+function _ephemeralActorInputPorts(run: ActiveRun): Set<string> {
+  const ports = new Set(["command", "intervention", "checkpoint_resume"]);
+  for (const node of run.dagRun.graph.nodes) {
+    if (node.node_type !== "await_command_gateway") continue;
+    ports.add(node.gateway_config?.command_port || "command");
+  }
+  return ports;
 }
 
 function _branchInterventionResetNodeIds(run: ActiveRun, actorNodeId: string): string[] {
@@ -2932,9 +3074,11 @@ function _resetActorBranchForIntervention(input: {
   const previousMailbox = input.run.dagRun.mailboxes.get(input.actor.node_id);
   if (previousMailbox) {
     const actorCarryover = carryover.get(input.actor.node_id) ?? [];
+    const ephemeralPorts = _ephemeralActorInputPorts(input.run);
     for (const [port, values] of previousMailbox.entries()) {
-      if (port === "intervention" || port === "checkpoint_resume") continue;
-      for (const value of values) {
+      if (ephemeralPorts.has(port) || actorCarryover.some((entry) => entry.port === port)) continue;
+      const value = values.at(-1);
+      if (value !== undefined) {
         actorCarryover.push({ fromNode: "__previous_actor_input__", port, value });
       }
     }

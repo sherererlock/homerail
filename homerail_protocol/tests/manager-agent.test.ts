@@ -12,19 +12,27 @@ import {
   normalizeManagerAgentHarness,
   normalizeManagerAgentRuntimeAgentType,
 } from "../src/manager-agent.js";
-import { buildManagerAgentSystemPrompt } from "../src/manager-agent-prompt.js";
+import {
+  buildManagerAgentSystemPrompt,
+  managerAgentDagContextPrompt,
+  normalizeManagerAgentDagContext,
+} from "../src/manager-agent-prompt.js";
 import {
   MANAGER_AGENT_COMMON_TOOL_NAMES,
   MANAGER_AGENT_COMMON_VOICE_TOOL_NAMES,
   MANAGER_AGENT_DAG_ACTOR_INTERVENTION_OPERATIONS,
   MANAGER_AGENT_HOST_VOICE_TOOL_NAMES,
   MANAGER_AGENT_WIDGET_FILE_TYPES,
+  canonicalManagerAgentToolCallName,
   formatHomeRailPromptHandoff,
   formatHomeRailPromptToolCall,
   managerAgentDagCommandResult,
   managerAgentCommonToolCatalog,
+  managerAgentRequiredToolObjectivePrompt,
   managerAgentToolSpec,
+  normalizeManagerAgentDagActorCommandInput,
   normalizeManagerAgentDagActorInterventionInput,
+  normalizeManagerAgentRequiredToolCalls,
   parseHomeRailPromptHandoff,
   parseHomeRailPromptToolCalls,
   stripHomeRailPromptMarkers,
@@ -34,6 +42,70 @@ import {
   MANAGER_AGENT_WIDGET_FILE_TOOL_NAMES,
   type ManagerAgentWidgetFileToolAdapter,
 } from "../src/manager-agent-widget-tools.js";
+
+describe("Manager Agent required tool objective", () => {
+  it("normalizes harness-specific MCP transport names at the public boundary", () => {
+    expect(canonicalManagerAgentToolCallName("start_supervised_dag")).toBe("start_supervised_dag");
+    expect(canonicalManagerAgentToolCallName("mcp__dag-tools__start_supervised_dag"))
+      .toBe("start_supervised_dag");
+    expect(canonicalManagerAgentToolCallName("mcp__plugin_server__qualified_tool"))
+      .toBe("qualified_tool");
+    expect(canonicalManagerAgentToolCallName("mcp__malformed")).toBe("mcp__malformed");
+    expect(canonicalManagerAgentToolCallName(null)).toBe("");
+  });
+
+  it("normalizes and renders only an explicit generic runtime objective", () => {
+    expect(normalizeManagerAgentRequiredToolCalls([
+      " start_supervised_dag ",
+      "focus_dag_actor",
+      "mcp__dag-tools__focus_dag_actor",
+      "start_supervised_dag",
+      "",
+      null,
+    ])).toEqual(["start_supervised_dag", "focus_dag_actor"]);
+
+    const prompt = managerAgentRequiredToolObjectivePrompt([
+      "start_supervised_dag",
+      "focus_dag_actor",
+    ]);
+    expect(prompt).toContain("start_supervised_dag, focus_dag_actor");
+    expect(prompt).toContain("runtime verifies successful tool completion");
+    expect(prompt).not.toMatch(/game|showcase|three-worker/i);
+    expect(managerAgentRequiredToolObjectivePrompt(undefined)).toBe("");
+  });
+});
+
+describe("Manager Agent DAG context", () => {
+  it("renders a bounded trusted current-run hint for Actor follow-ups", () => {
+    const context = normalizeManagerAgentDagContext({
+      context_version: 1,
+      current_run_id: "run-current",
+      attached_run_ids: [
+        ...Array.from({ length: 20 }, (_, index) => `run-${index + 1}`),
+        "run-current",
+      ],
+    });
+
+    expect(context?.attached_run_ids).toHaveLength(16);
+    expect(context?.attached_run_ids.at(-1)).toBe("run-current");
+    const prompt = managerAgentDagContextPrompt(context);
+    expect(prompt).toContain("authoritative read-only runtime data");
+    expect(prompt).toContain('"current_run_id":"run-current"');
+    expect(prompt).toContain("first call get_dag_supervision");
+    expect(prompt).toContain("send_dag_actor_command");
+    expect(prompt).toContain("keep sibling Actors unchanged");
+    expect(prompt).toContain("Do not create a replacement generated-view Block");
+  });
+
+  it("omits invalid or empty DAG context", () => {
+    expect(normalizeManagerAgentDagContext({
+      context_version: 1,
+      current_run_id: "\nunsafe",
+      attached_run_ids: [],
+    })).toBeUndefined();
+    expect(managerAgentDagContextPrompt(undefined)).toBe("");
+  });
+});
 
 describe("Manager Agent harness contract", () => {
   it("keeps canonical public harness ids explicit", () => {
@@ -245,13 +317,39 @@ describe("Manager Agent harness contract", () => {
       send_dag_actor_command: {
         type: "object",
         properties: {
-          run_id: { type: "string" },
-          actor_id: { type: "string" },
-          expected_round_id: { type: "string" },
-          idempotency_key: { type: "string" },
-          payload: {},
+          run_id: {
+            type: "string",
+            minLength: 1,
+            maxLength: 256,
+            pattern: "^(?=[^\\u0000-\\u001f\\u007f]*\\S)[^\\u0000-\\u001f\\u007f]+$",
+          },
+          expected_round_id: {
+            type: "string",
+            minLength: 1,
+            maxLength: 256,
+            pattern: "^(?=[^\\u0000-\\u001f\\u007f]*\\S)[^\\u0000-\\u001f\\u007f]+$",
+          },
+          commands: {
+            type: "array",
+            minItems: 1,
+            maxItems: 128,
+            items: {
+              type: "object",
+              properties: {
+                actor_id: {
+                  type: "string",
+                  minLength: 1,
+                  maxLength: 256,
+                  pattern: "^(?=[^\\u0000-\\u001f\\u007f]*\\S)[^\\u0000-\\u001f\\u007f]+$",
+                },
+                payload: {},
+              },
+              required: ["actor_id", "payload"],
+              additionalProperties: false,
+            },
+          },
         },
-        required: ["run_id", "actor_id", "expected_round_id", "idempotency_key", "payload"],
+        required: ["run_id", "expected_round_id", "commands"],
         additionalProperties: false,
       },
       focus_dag_actor: {
@@ -293,6 +391,124 @@ describe("Manager Agent harness contract", () => {
     expect(intervention.description).toContain("get_dag_supervision");
     expect(intervention.description).toContain("expected_state_token");
     expect(intervention.description).toContain("Never infer physical execution targets");
+  });
+
+  it("exposes only the atomic batch DAG Actor command schema to models", () => {
+    const validate = new Ajv({ strict: true }).compile(
+      managerAgentToolSpec("send_dag_actor_command").input_schema,
+    );
+    const legacy = {
+      run_id: "run-supervised",
+      actor_id: "research",
+      expected_round_id: "round-0001",
+      idempotency_key: "command-research-2",
+      payload: { task: "continue" },
+    };
+    const batch = {
+      run_id: "run-supervised",
+      expected_round_id: "round-0001",
+      commands: [
+        { actor_id: "research", payload: { task: "continue research" } },
+        { actor_id: "verify", payload: { task: "continue verification" } },
+      ],
+    };
+
+    expect(validate(legacy)).toBe(false);
+    expect(validate(batch)).toBe(true);
+    expect(validate({
+      ...batch,
+      commands: Array.from({ length: 128 }, (_, index) => ({
+        actor_id: `actor-${index}`,
+        payload: index,
+      })),
+    })).toBe(true);
+
+    const invalidInputs = [
+      { ...legacy, expected_round_id: "" },
+      { ...legacy, commands: batch.commands },
+      { ...batch, actor_id: "research" },
+      { ...batch, commands: [] },
+      {
+        ...batch,
+        commands: Array.from({ length: 129 }, (_, index) => ({ actor_id: `actor-${index}`, payload: index })),
+      },
+      { ...batch, commands: [{ actor_id: "research" }] },
+      { ...batch, commands: [{ actor_id: " ", payload: null }] },
+      { ...batch, commands: [{ actor_id: "research", payload: null, worker_id: "forbidden" }] },
+      { ...batch, unexpected: true },
+    ];
+    for (const input of invalidInputs) expect(validate(input), JSON.stringify(input)).toBe(false);
+  });
+
+  it("normalizes legacy and batch DAG Actor commands and rejects malformed batches", () => {
+    expect(normalizeManagerAgentDagActorCommandInput({
+      run_id: "  run /?# supervised  ",
+      actor_id: "  research  ",
+      expected_round_id: "  round-0001  ",
+      idempotency_key: "  command-research-2  ",
+      payload: { task: "continue" },
+    })).toEqual({
+      run_id: "run /?# supervised",
+      expected_round_id: "round-0001",
+      commands: [{
+        actor_id: "research",
+        idempotency_key: "command-research-2",
+        payload: { task: "continue" },
+      }],
+    });
+    expect(normalizeManagerAgentDagActorCommandInput({
+      run_id: "  run-batch  ",
+      expected_round_id: "  round-0002  ",
+      commands: [
+        { actor_id: "  research  ", payload: null },
+        { actor_id: "verify", payload: false },
+      ],
+    })).toEqual({
+      run_id: "run-batch",
+      expected_round_id: "round-0002",
+      commands: [
+        { actor_id: "research", payload: null },
+        { actor_id: "verify", payload: false },
+      ],
+    });
+
+    expect(() => normalizeManagerAgentDagActorCommandInput({
+      run_id: "run-batch",
+      expected_round_id: "round-0001",
+      commands: [],
+    })).toThrow(/between 1 and 128 entries/);
+    expect(() => normalizeManagerAgentDagActorCommandInput({
+      run_id: "run-batch",
+      expected_round_id: "round-0001",
+      commands: [{ actor_id: "research" }],
+    })).toThrow(/commands\[0\]\.payload is required/);
+    expect(() => normalizeManagerAgentDagActorCommandInput({
+      run_id: "run-batch",
+      expected_round_id: "round-0001",
+      commands: [{ actor_id: "research", payload: null, worker_id: "forbidden" }],
+    })).toThrow(/commands\[0\].*additional properties: worker_id/);
+    expect(() => normalizeManagerAgentDagActorCommandInput({
+      run_id: "run-batch",
+      expected_round_id: "round-0001",
+      commands: [
+        { actor_id: "research", payload: 1 },
+        { actor_id: " research ", payload: 2 },
+      ],
+    })).toThrow(/unique actor_id/);
+    expect(() => normalizeManagerAgentDagActorCommandInput({
+      run_id: "run-batch",
+      actor_id: "research",
+      expected_round_id: "round-0001",
+      idempotency_key: "legacy-key",
+      payload: null,
+      commands: [{ actor_id: "verify", payload: null }],
+    })).toThrow(/either actor_id\/idempotency_key\/payload or commands, not both/);
+    expect(() => normalizeManagerAgentDagActorCommandInput({
+      run_id: "run-batch",
+      expected_round_id: "round-0001",
+      commands: [{ actor_id: "research", payload: null }],
+      container_id: "forbidden",
+    })).toThrow(/additional properties: container_id/);
   });
 
   it("rejects invalid and physical-target inputs for DAG Actor intervention", () => {

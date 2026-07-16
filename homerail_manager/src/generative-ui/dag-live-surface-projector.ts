@@ -712,8 +712,23 @@ function buildProjectedNode(input: {
     ?? input.actor.role;
   const summary = firstString(input.event.payload, ["message", "summary", "detail", "reason", "error"])
     ?? presentation.label;
-  const findings = previous?.findings ? [...previous.findings] : [];
-  if (activity === "finding") {
+  let findings = previous?.state.round_id === input.event.round_id && previous.findings
+    ? [...previous.findings]
+    : [];
+  const completedItems = activity === "completed" && Array.isArray(input.event.payload.items)
+    ? input.event.payload.items
+        .map(boundedString)
+        .filter((item): item is string => item !== undefined)
+        .slice(0, MAX_PROJECTED_FINDINGS)
+    : [];
+  if (completedItems.length > 0) {
+    findings = completedItems.map((item, index) => ({
+      id: `${input.event.event_id}:item:${index + 1}`,
+      title: item,
+      sequence: input.event.sequence,
+      timestamp: input.event.timestamp,
+    }));
+  } else if (activity === "finding") {
     const detail = firstString(input.event.payload, ["detail", "description"]);
     findings.push({
       id: input.event.event_id,
@@ -787,7 +802,7 @@ function buildProjectedNode(input: {
       },
       content,
       a2ui: structuredClone(LIVE_SURFACE_A2UI),
-      presentation: { density: "summary" },
+      presentation: { density: "summary", canvas_size: "1x2" },
       lifecycle: { persistence: "session", removable: true },
       fallback: {
         title,
@@ -1203,7 +1218,7 @@ function buildInterventionNode(input: {
       },
       content,
       a2ui: structuredClone(LIVE_SURFACE_A2UI),
-      presentation: { density: "summary" },
+      presentation: { density: "summary", canvas_size: "1x2" },
       lifecycle: { persistence: "session", removable: true },
       fallback: { title, summary: input.summary },
       provenance: {

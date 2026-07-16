@@ -19,7 +19,7 @@ import type { AuditWriters } from "./audit/index.js";
 import { appendTranscriptEntry, redactAgentContext, saveSession } from "./session/session-store.js";
 import { redactTelemetry } from "./telemetry-redaction.js";
 import { snapshotWorkspace, verifyWorkspacePolicy, type WorkspaceSnapshot } from "./workspace-policy.js";
-import { createDagActivityEmitter } from "./dag-activity.js";
+import { completedActivityPayloadForHandoff, createDagActivityEmitter } from "./dag-activity.js";
 
 export interface PromptJob {
   task: string;
@@ -334,7 +334,7 @@ export async function runPrompt(
     const agent = createAgentClient(agentBackend);
     const context: AgentRunContext = {
       systemPrompt: effectiveSystemPrompt,
-      systemPromptMode: "append",
+      systemPromptMode: correctionOnly ? "replace" : "append",
       provider: job.llmProvider,
       protocol: job.llmProtocol,
       model: job.dagConfig.model,
@@ -504,12 +504,7 @@ export async function runPrompt(
       }
       if (workspaceValid && dagState.handoffData) {
         const handoff = dagState.handoffData as Record<string, unknown>;
-        const port = typeof handoff.port === "string"
-          ? handoff.port
-          : typeof handoff.from_port === "string"
-            ? handoff.from_port
-            : undefined;
-        activityEmitter.emit("completed", port ? { port } : {});
+        activityEmitter.emit("completed", completedActivityPayloadForHandoff(handoff));
         terminalActivityEmitted = true;
         // This is the authoritative runtime payload, not telemetry. The
         // Manager applies it before writing redacted evidence copies.

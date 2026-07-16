@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { DagActivityEventV1, DagNodeConfig } from "homerail-protocol";
-import { createDagActivityEmitter } from "../dag-activity.js";
+import { completedActivityPayloadForHandoff, createDagActivityEmitter } from "../dag-activity.js";
 import { createDagTools, createDagToolsState } from "../dag-tools/index.js";
 
 function config(overrides: Partial<DagNodeConfig> = {}): DagNodeConfig {
@@ -16,6 +16,49 @@ function config(overrides: Partial<DagNodeConfig> = {}): DagNodeConfig {
 }
 
 describe("DAG activity emitter", () => {
+  it("projects a redacted contract summary into successful completion activity", () => {
+    expect(completedActivityPayloadForHandoff({
+      port: "report",
+      summary: "fallback summary",
+      content: {
+        summary: "Verified route; api_key=sk-secretsecret1234",
+        items: [
+          "step one",
+          "step two api_key=sk-anothersecret1234",
+          "",
+          3,
+        ],
+      },
+    })).toEqual({
+      port: "report",
+      summary: "Verified route; api_key=***REDACTED***",
+      items: ["step one", "step two api_key=***REDACTED***"],
+    });
+  });
+
+  it("bounds completion items without exposing arbitrary handoff content", () => {
+    expect(completedActivityPayloadForHandoff({
+      port: "report",
+      content: {
+        summary: "ready",
+        items: Array.from({ length: 10 }, (_, index) => `item ${index + 1}`),
+        private_details: "not telemetry",
+      },
+    })).toEqual({
+      port: "report",
+      summary: "ready",
+      items: Array.from({ length: 8 }, (_, index) => `item ${index + 1}`),
+    });
+  });
+
+  it("falls back to the handoff summary without exposing arbitrary content", () => {
+    expect(completedActivityPayloadForHandoff({
+      from_port: "done",
+      content: { result: "private model output" },
+      summary: "  concise result  ",
+    })).toEqual({ port: "done", summary: "concise result" });
+  });
+
   it("preserves actor identity and continues a supplied generation sequence", () => {
     const events: DagActivityEventV1[] = [];
     const emitter = createDagActivityEmitter(config({

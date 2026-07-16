@@ -120,10 +120,80 @@ describe("DAG correction and dispatch retry", () => {
     expect(dispatcher.calls).toHaveLength(2);
     expect(dispatcher.calls[1].inputs.correction?.[0]).toContain("agent ended without DAG handoff");
     expect(dispatcher.calls[1].inputs.correction?.[0]).toContain("Declared output ports for this node: done.");
+    expect(dispatcher.calls[1].inputs.correction?.[0]).toContain("Preferred success ports: done.");
+    expect(dispatcher.calls[1].inputs.correction?.[0]).toContain("Failure ports: none declared.");
     expect(dispatcher.calls[1].inputs.correction?.[0]).toContain("Correction mode permits only the handoff tool");
     expect(dispatcher.calls[1].inputs.correction?.[0]).toContain("Do not repeat investigation");
     expect(dispatcher.calls[1].inputs.correction?.[0]).toContain("Never print a pseudo-tool call");
     expect(dispatcher.calls[1].inputs.correction?.[0]).toContain("Finish by calling the handoff tool exactly once");
+  });
+
+  it("includes the exact v1 output contract in correction-only work", () => {
+    const parsed = parseWorkflowSource(`
+api_version: homerail.ai/v1
+kind: Workflow
+metadata: { id: correction-schema, name: Correction Schema }
+spec:
+  contracts:
+    ActorReport:
+      type: object
+      additionalProperties: false
+      required: [actor, status, summary]
+      properties:
+        actor: { type: string, const: systems_guide }
+        status: { type: string, enum: [ready, blocked] }
+        summary: { type: string, maxLength: 320 }
+    Failure:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error: { type: string }
+  agents:
+    worker: { system: Return a report. }
+  nodes:
+    start:
+      kind: agent
+      agent: worker
+      outputs:
+        report: { contract: ActorReport }
+        failed: { contract: Failure }
+    terminal:
+      kind: terminal
+      outcome: success
+      inputs:
+        result: { contract: ActorReport }
+    failed:
+      kind: terminal
+      outcome: failure
+      inputs:
+        result: { contract: Failure }
+  edges:
+    - { from: start.report, to: terminal.result }
+    - { from: start.failed, to: failed.result, condition: on_failure }
+  policies:
+    max_corrections_per_node: 1
+`);
+    parsed.meta.agents!.worker!.agent_type = "deterministic";
+    createActiveRun("run-correction-schema", parsed);
+    const dispatcher = new FlakyDispatcher({ status: "dispatched", targetType: "fake", targetId: "first" });
+
+    expect(dispatchReadyNodes("run-correction-schema", dispatcher)).toBe(1);
+    expect(requestNodeCorrection(
+      "run-correction-schema",
+      "start",
+      "invalid ActorReport",
+    ).status).toBe("scheduled");
+    expect(dispatchReadyNodes("run-correction-schema", dispatcher)).toBe(1);
+
+    const prompt = String(dispatcher.calls[1].inputs.correction?.[0]);
+    expect(prompt).toContain('The handoff tool call shape is {"port":"<declared port>","content":');
+    expect(prompt).toContain('"report":{"contract":"ActorReport","schema":');
+    expect(prompt).toContain('"additionalProperties":false');
+    expect(prompt).toContain('"maxLength":320');
+    expect(prompt).toContain("Preferred success ports: report.");
+    expect(prompt).toContain("Failure ports: failed.");
+    expect(prompt).toContain("never use it merely to report this correction error");
   });
 
   it("restores success descendants skipped by the failed attempt", () => {

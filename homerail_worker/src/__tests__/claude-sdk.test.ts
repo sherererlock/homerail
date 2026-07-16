@@ -712,6 +712,51 @@ describe("ClaudeSdkAdapter", () => {
     expect(events.some((e) => e.type === "debug" && e.message === "mcp_server_registered")).toBe(true);
   });
 
+  it("stops a provider stream after a successful terminal handoff", async () => {
+    let capturedAbortController: AbortController | undefined;
+    const toolDef: DagToolDefinition = {
+      name: "handoff",
+      description: "handoff tool",
+      input_schema: { type: "object", properties: {} },
+      handler: async () => ({ content: [{ type: "text", text: "ok" }] }),
+    };
+
+    vi.doMock("@anthropic-ai/claude-agent-sdk", () => ({
+      async *query(params: { options?: Record<string, unknown> }) {
+        const server = (params.options?.mcpServers as Record<string, {
+          tools: Array<{ handler: (args: Record<string, unknown>, extra: unknown) => Promise<unknown> }>;
+        }>)["dag-tools"];
+        await server.tools[0].handler({}, {});
+        capturedAbortController = params.options?.abortController as AbortController;
+        await new Promise(() => {});
+      },
+      createSdkMcpServer(opts: { name: string; tools?: Array<Record<string, unknown>> }) {
+        return { type: "sdk", name: opts.name, tools: opts.tools ?? [] };
+      },
+      tool(
+        name: string,
+        description: string,
+        inputSchema: Record<string, unknown>,
+        handler: (args: Record<string, unknown>, extra: unknown) => Promise<unknown>,
+      ) {
+        return { name, description, inputSchema, handler };
+      },
+    }));
+
+    const { ClaudeSdkAdapter } = await import("../agent/claude-sdk.js");
+    const adapter = new ClaudeSdkAdapter();
+    const events: AgentEvent[] = [];
+    for await (const event of adapter.run("test", [toolDef], ctx)) events.push(event);
+
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "debug",
+      message: "query_stopped_after_handoff",
+    }));
+    expect(events.some((event) => event.type === "error")).toBe(false);
+    expect(events.at(-1)?.type).toBe("done");
+    expect(capturedAbortController?.signal.aborted).toBe(true);
+  });
+
   it("converts DAG JSON schema to Claude SDK Zod raw shape", () => {
     const shape = jsonSchemaObjectToZodRawShape({
       type: "object",
