@@ -74,7 +74,47 @@ if [ -d "$SOURCE_ROOT/.git" ]; then
 fi
 
 mkdir -p "$PRODUCTION_ROOT/releases" "$PRODUCTION_ROOT/locks" "$HOMERAIL_HOME" "$(dirname "$UNIT_PATH")"
+HOMERAIL_HOME="$(realpath "$HOMERAIL_HOME")"
 chmod 700 "$HOMERAIL_HOME"
+
+# systemd user services do not inherit interactive-shell Node initialization.
+# Resolve an optional Codex entry point now; the release later wraps it with
+# the exact Node binary copied into runtime/ instead of trusting its shebang or
+# prepending a package-manager directory to the persistent service PATH.
+CODEX_BIN="${HOMERAIL_CODEX_BIN:-}"
+if [ -n "$CODEX_BIN" ] && [[ "$CODEX_BIN" != */* ]]; then
+  CODEX_BIN="$(command -v "$CODEX_BIN" 2>/dev/null || true)"
+fi
+if [ -z "$CODEX_BIN" ]; then
+  CODEX_BIN="$(command -v codex 2>/dev/null || true)"
+fi
+SERVICE_PATH="/usr/local/bin:/usr/bin:/bin"
+CODEX_UNIT_ENV=""
+if [ -n "$CODEX_BIN" ]; then
+  if [ ! -f "$CODEX_BIN" ] || [ ! -x "$CODEX_BIN" ]; then
+    echo "HOMERAIL_CODEX_BIN is not an executable file: $CODEX_BIN" >&2
+    exit 1
+  fi
+  CODEX_BIN="$(realpath "$CODEX_BIN")"
+  if [[ ! "$CODEX_BIN" =~ ^/[A-Za-z0-9._/@+=:-]+$ ]]; then
+    echo "HOMERAIL_CODEX_BIN must resolve to a safe absolute path." >&2
+    exit 1
+  fi
+  CURRENT_UID="$(id -u)"
+  for trusted_path in "$CODEX_BIN" "$(dirname "$CODEX_BIN")"; do
+    trusted_owner="$(stat -Lc '%u' "$trusted_path")"
+    trusted_mode="$(stat -Lc '%a' "$trusted_path")"
+    if [ "$trusted_owner" != "0" ] && [ "$trusted_owner" != "$CURRENT_UID" ]; then
+      echo "HOMERAIL_CODEX_BIN must be owned by the service user or root." >&2
+      exit 1
+    fi
+    if (( (8#$trusted_mode & 8#022) != 0 )); then
+      echo "HOMERAIL_CODEX_BIN and its parent directory must not be group/world writable." >&2
+      exit 1
+    fi
+  done
+  CODEX_UNIT_ENV="Environment=HOMERAIL_CODEX_BIN=$PRODUCTION_ROOT/current/runtime/codex"
+fi
 exec 9>"$PRODUCTION_ROOT/locks/deploy.lock"
 if ! flock -w 60 9; then
   echo "Another production deployment is active." >&2
@@ -105,6 +145,13 @@ rsync -a --delete \
   "$SOURCE_ROOT/" "$STAGING/"
 mkdir -p "$STAGING/runtime"
 install -m 0755 "$(command -v node)" "$STAGING/runtime/node"
+if [ -n "$CODEX_BIN" ]; then
+  cat > "$STAGING/runtime/codex" <<WRAPPER
+#!/bin/sh
+exec "\$(dirname "\$0")/node" "$CODEX_BIN" "\$@"
+WRAPPER
+  chmod 0755 "$STAGING/runtime/codex"
+fi
 printf '%s\n' "$REVISION" > "$STAGING/REVISION"
 chmod 0755 "$STAGING/scripts/run-production-service.sh"
 mv "$STAGING" "$RELEASE"
@@ -140,7 +187,8 @@ Environment=HOMERAIL_PRODUCTION_UI_HOST=$UI_HOST
 Environment=HOMERAIL_PRODUCTION_UI_PORT=$UI_PORT
 Environment=HOMERAIL_PRODUCTION_UI_HTTP_PORT=$UI_HTTP_PORT
 Environment=HOMERAIL_PRODUCTION_PUBLIC_HOST=$PUBLIC_HOST
-Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=PATH=$SERVICE_PATH
+$CODEX_UNIT_ENV
 ExecStart=$PRODUCTION_ROOT/current/scripts/run-production-service.sh
 Restart=always
 RestartSec=5

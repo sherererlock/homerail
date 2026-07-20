@@ -12,6 +12,7 @@ import {
   getSetting,
   listProviders,
   listSettings,
+  resolveClaudeSdkAuthModeForSetting,
   resolveClaudeSdkBaseUrlForSetting,
   upsertProvider,
   updateSetting,
@@ -913,6 +914,125 @@ describe("custom LLM providers", () => {
     expect(migrated).toContain("api_key_encrypted");
     expect(migrated).toContain("manager_encrypted");
     expect(migrated).toContain("endpoint_id");
+  });
+
+  it("reconciles stale built-in endpoint snapshots without asking users to edit their database", () => {
+    const setting = createSetting({
+      provider_id: "aliyun",
+      endpoint_id: "aliyun_dashscope_cn_token_plan",
+      model_name: "qwen3.8-max-preview",
+      api_key: "sk-sp-legacy-token-plan",
+      is_active: true,
+      is_default: true,
+    });
+    getDb().prepare(`
+      UPDATE llm_settings
+      SET endpoint_id = ?, endpoint_name = ?, plan_type = ?, protocol = ?,
+          base_url = ?, chat_completions_base_url = ?, responses_base_url = ?,
+          anthropic_base_url = ?
+      WHERE id = ?
+    `).run(
+      "aliyun_dashscope_cn_api",
+      "DashScope 中国大陆 - API 计费",
+      "api_billing",
+      "openai_compatible",
+      "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+      "https://dashscope.aliyuncs.com/api/v2/apps/claude-code-proxy",
+      setting.id,
+    );
+
+    const reconciled = listSettings().find((candidate) => candidate.id === setting.id);
+
+    expect(reconciled).toMatchObject({
+      endpoint_id: "aliyun_dashscope_cn_token_plan",
+      endpoint_name: "DashScope 中国大陆 - Token Plan",
+      plan_type: "token_plan",
+      base_url: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+      chat_completions_base_url: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+      responses_base_url: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+      anthropic_base_url: "https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic",
+    });
+    expect(resolveClaudeSdkBaseUrlForSetting(reconciled!)).toBe(
+      "https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic",
+    );
+    expect(resolveClaudeSdkAuthModeForSetting(reconciled!)).toBe("auth_token");
+
+    const persisted = getDb().prepare(`
+      SELECT endpoint_id, base_url, anthropic_base_url
+      FROM llm_settings
+      WHERE id = ?
+    `).get(setting.id);
+    expect(persisted).toEqual({
+      endpoint_id: "aliyun_dashscope_cn_token_plan",
+      base_url: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+      anthropic_base_url: "https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic",
+    });
+  });
+
+  it("recovers a removed built-in endpoint id from unambiguous model availability", () => {
+    const setting = createSetting({
+      provider_id: "aliyun",
+      endpoint_id: "aliyun_dashscope_cn_token_plan",
+      model_name: "qwen3.8-max-preview",
+      api_key: "legacy-token-plan-key-without-prefix",
+      is_active: true,
+    });
+    getDb().prepare(`
+      UPDATE llm_settings
+      SET endpoint_id = ?, endpoint_name = ?, base_url = ?,
+          chat_completions_base_url = ?, responses_base_url = ?, anthropic_base_url = ?
+      WHERE id = ?
+    `).run(
+      "aliyun_retired_token_plan",
+      "Retired Token Plan",
+      "https://retired.example/v1",
+      "https://retired.example/v1",
+      "https://retired.example/v1",
+      "https://retired.example/anthropic",
+      setting.id,
+    );
+
+    const reconciled = listSettings().find((candidate) => candidate.id === setting.id);
+
+    expect(reconciled).toMatchObject({
+      endpoint_id: "aliyun_dashscope_cn_token_plan",
+      plan_type: "token_plan",
+      anthropic_base_url: "https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic",
+    });
+  });
+
+  it("canonicalizes every model with the endpoint selected during legacy recovery", () => {
+    const setting = createSetting({
+      provider_id: "kimi_cn",
+      endpoint_id: "kimi_coding_plan",
+      model_name: "kimi-for-coding",
+      models: ["kimi-k2.7-code", "kimi-for-coding-highspeed"],
+      api_key: "legacy-coding-plan-key",
+      is_active: true,
+    });
+    getDb().prepare(`
+      UPDATE llm_settings
+      SET endpoint_id = ?, endpoint_name = ?, base_url = ?,
+          chat_completions_base_url = ?, anthropic_base_url = ?
+      WHERE id = ?
+    `).run(
+      "kimi_retired_coding_plan",
+      "Retired Coding Plan",
+      "https://retired.example/v1",
+      "https://retired.example/v1",
+      "https://retired.example/anthropic",
+      setting.id,
+    );
+
+    const reconciled = listSettings().find((candidate) => candidate.id === setting.id);
+
+    expect(reconciled).toMatchObject({
+      endpoint_id: "kimi_coding_plan",
+      model_name: "kimi-for-coding",
+      models: ["kimi-for-coding", "kimi-for-coding-highspeed"],
+    });
   });
 
   it("locks built-in provider base URLs while keeping custom providers editable", async () => {
