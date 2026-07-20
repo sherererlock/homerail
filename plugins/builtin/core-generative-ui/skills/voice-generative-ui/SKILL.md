@@ -1,6 +1,6 @@
 ---
 name: voice-generative-ui
-description: Choose and maintain truthful structured UI for a HomeRail voice session, using only currently available Core and plugin tools.
+description: Design and maintain truthful HomeRail generative UI for voice or text. Use for dashboards, cards, charts, visual reports, screenshot-ready output, or supervised multi-Actor live panels that update in parallel and across follow-ups.
 ---
 
 # Voice Generative UI
@@ -24,6 +24,30 @@ Keep generated UI compact and spatially meaningful:
 - Put long checklists, evidence, or artifacts in UI and keep spoken text brief.
 - Ask for confirmation before execution when the task is ready.
 - Never invent a run, file change, artifact, or external action.
+
+## Choose the presentation path
+
+Use one of these paths deliberately. They are different runtime contracts:
+
+1. **Manager-owned Block** — For one result, memo, dashboard, chart, or report that the Manager Agent can produce in the current turn, call `upsert_generated_view`. Reuse the same Block id on follow-ups.
+2. **Supervised multi-Actor Surfaces** — When the user asks for multiple roles or panels to work in parallel, remain live, or accept later per-panel corrections, load `homerail-dag-ops` and start the concrete `assets/orchestrations/multi-actor-live-report.yaml.template` Workflow with `start_supervised_dag`. It creates stable `research`, `synthesis`, and `visual_story` Actors whose Surfaces are updated by their Workers.
+3. **Skill-owned presenter** — When another loaded Skill provides `skill_view_present`, use that trusted presenter instead of recreating its domain layout.
+
+### Choose three Actors deliberately
+
+Do use three Actors only for three non-overlapping, separately useful panels that
+benefit from stable per-panel follow-ups. Share one source identity; run
+independent lanes in parallel and wire dependent lanes with explicit edges or
+structured handoffs. Give each panel a distinct visual grammar and keep prose in
+a disclosure. Do not create duplicate generalists, split one answer into
+decorative panels, or claim research -> synthesis -> publication without a data
+edge. Load `homerail-dag-ops` and read its multi-Actor reference before launch.
+
+The abstract `orchestrator-workers` pattern is a planner/fan-out/verifier topology. It does not declare Surface views, `report_surface_state`, or `await_command`; never promise live panels merely because that pattern started. Use it for bounded parallel evidence, not persistent multi-panel presentation.
+
+For a supervised Surface run, the Manager Agent starts and supervises the Workflow but never fabricates Worker output. After launch, use the returned stable Actor ids. On a later user request, read supervision, send one atomic command array for all affected Actors, and keep unaffected siblings unchanged. A command acceptance is not proof that a Surface update completed.
+
+When this Skill is projected into a DAG Worker and `report_surface_state` is available, use only the pinned view advertised for that Actor. Submit the required `started`, `partial`, and `final` phases in order, send every visible presentation field as a complete snapshot on each phase, and hand off only after the final Surface update is accepted. Do not call Manager-owned generated-view Tools from a Worker.
 
 ## Native A2UI v1.0
 
@@ -77,7 +101,16 @@ For a bounded source list, repeat an `HrLink` through a template. Bind `label`, 
 { "id": "source-link", "component": "HrLink", "label": { "path": "label" }, "url": { "path": "url" }, "description": { "path": "description" } }
 ```
 
-Use `HrGrid` for visual density without shrinking text. Its `columns.default` is 1 to 3 and `columns.compact` is 1 to 2. Each `HrGridItem` wraps one `child` and uses `span` 1 to 3. Never use four columns. Prefer imagery, metrics, progress, compact diagrams, and short labels over paragraphs. Put detailed evidence inside `HrDisclosure` so the normal Block remains scannable and the expanded Block can reveal the full content.
+Use `HrGrid` for visual density without shrinking text. Its `columns.default` and `columns.compact` are 1 to 3. Use three compact columns only for short numeric metrics or small visual thumbnails; use one or two for prose. Each `HrGridItem` wraps one `child` and uses `span` 1 to 3. Never use four columns. Prefer imagery, metrics, progress, compact diagrams, and short labels over paragraphs. Put detailed evidence inside `HrDisclosure` so the normal Block remains scannable and the expanded Block can reveal the full content.
+
+Use the available tones as an expressive design vocabulary. Choose colors for the
+subject, mood, hierarchy, and relationships in the current Surface; never assign a
+permanent color to an Actor role or content category. Use color generously across
+badges, progress, metrics, and sections, and prefer a varied but coherent palette
+over neutral or monochrome output. Keep the palette stable during one update,
+maintain readable contrast, and pair color with labels or icons so meaning never
+depends on color alone. Host-owned operational status remains separate from the
+Actor's creative palette.
 
 Actions are A2UI events, but the event `name` must exactly match an Action already registered by the Block Kind. Do not send event context, `responsePath`, `wantResponse: true`, or `functionCall`; HomeRail owns every Action argument. The generic Core generated-view Tool exposes no Actions, so do not add a `Button` to it.
 

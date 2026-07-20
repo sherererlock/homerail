@@ -34,7 +34,15 @@ const props = withDefaults(defineProps<{
 const { t } = useI18n()
 
 const ICONS = [Target, Code2, Code2, TestTube2, TestTube2, ShieldCheck, Rocket]
-const COLORS = ['#a855f7', '#3b82f6', '#3b82f6', '#f59e0b', '#f59e0b', '#10b981', '#ef4444']
+const COLORS = [
+  'var(--hr-speaking)',
+  'var(--hr-info)',
+  'var(--hr-info)',
+  'var(--hr-warning)',
+  'var(--hr-warning)',
+  'var(--hr-success)',
+  'var(--hr-danger)',
+]
 const labels = computed(() => [
   t('shell.startup.roles.scout'),
   t('shell.startup.roles.engineerA'),
@@ -64,7 +72,7 @@ const nodes = computed<AnimNode[]>(() => {
     id: String(i),
     label,
     icon: ICONS[i] || Bot,
-    color: COLORS[i] || '#8a8a8a',
+    color: COLORS[i] || 'var(--hr-text-3)',
     x: positions[i]?.x ?? CX,
     y: positions[i]?.y ?? CY,
   }))
@@ -140,7 +148,7 @@ const edgePath = (from: AnimNode, to: AnimNode) =>
 </script>
 
 <template>
-  <div class="flex items-center justify-center h-full w-full bg-[#0a0a0f] overflow-hidden">
+  <div class="flex items-center justify-center h-full w-full bg-[var(--hr-bg)] overflow-hidden">
     <svg :viewBox="`0 0 ${W} ${H}`" class="max-w-[700px] max-h-[80vh]" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg">
       <defs>
         <filter v-for="n in nodes" :key="'glow-' + n.id" :id="'glow-' + n.id" x="-50%" y="-50%" width="200%" height="200%">
@@ -151,14 +159,14 @@ const edgePath = (from: AnimNode, to: AnimNode) =>
           </feMerge>
         </filter>
         <linearGradient id="edgeGrad" x1="0%" y1="0%" x2="0%" y2="100%">
-          <stop offset="0%" stop-color="#3b82f6" stop-opacity="0.5" />
-          <stop offset="100%" stop-color="#10b981" stop-opacity="0.5" />
+          <stop offset="0%" stop-color="var(--hr-info)" stop-opacity="0.5" />
+          <stop offset="100%" stop-color="var(--hr-success)" stop-opacity="0.5" />
         </linearGradient>
       </defs>
 
       <!-- Background grid -->
       <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
-        <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1a1a2e" stroke-width="0.5" />
+        <path d="M 40 0 L 0 0 0 40" fill="none" stroke="var(--hr-border)" stroke-width="0.5" />
       </pattern>
       <rect width="100%" height="100%" fill="url(#grid)" opacity="0.3" />
 
@@ -205,7 +213,7 @@ const edgePath = (from: AnimNode, to: AnimNode) =>
         <!-- Node body -->
         <rect
           x="-22" y="-18" width="44" height="36" rx="10"
-          :fill="node.color + '15'"
+          :fill="`color-mix(in srgb, ${node.color} 12%, transparent)`"
           :stroke="node.color"
           stroke-width="1.5"
           :filter="pulseOpacity(ni) > 0.1 ? `url(#glow-${node.id})` : 'none'"
@@ -218,7 +226,7 @@ const edgePath = (from: AnimNode, to: AnimNode) =>
         <text
           x="0" y="14"
           text-anchor="middle"
-          fill="#9ca3af"
+          fill="var(--hr-text-3)"
           font-size="9"
           font-family="system-ui, sans-serif"
         >
@@ -231,7 +239,7 @@ const edgePath = (from: AnimNode, to: AnimNode) =>
         v-if="elapsed > 5"
         x="50%" y="95%"
         text-anchor="middle"
-        fill="#4b5563"
+        fill="var(--hr-text-4)"
         font-size="11"
         font-family="system-ui, sans-serif"
       >

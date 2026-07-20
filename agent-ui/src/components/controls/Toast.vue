@@ -1,23 +1,25 @@
 <template>
-  <Transition
-    enter-active-class="transition ease-out duration-200"
-    enter-from-class="opacity-0 -translate-y-2"
-    enter-to-class="opacity-100 translate-y-0"
-    leave-active-class="transition ease-in duration-150"
-    leave-from-class="opacity-100 translate-y-0"
-    leave-to-class="opacity-0 -translate-y-2"
-  >
-    <div v-if="show" class="toast-container" data-testid="global-toast">
-      <div :class="['toast', `toast-${type}`]">
-        <div class="toast-icon">
-          <component :is="toastIcon" class="h-4 w-4" />
-        </div>
-        <div class="toast-content">
-          {{ message }}
+  <Teleport to="body">
+    <Transition
+      enter-active-class="transition ease-out duration-200"
+      enter-from-class="opacity-0 -translate-y-2"
+      enter-to-class="opacity-100 translate-y-0"
+      leave-active-class="transition ease-in duration-150"
+      leave-from-class="opacity-100 translate-y-0"
+      leave-to-class="opacity-0 -translate-y-2"
+    >
+      <div v-if="show" class="toast-container" data-testid="global-toast">
+        <div :class="['toast', `toast-${type}`]">
+          <div class="toast-icon">
+            <component :is="toastIcon" class="h-4 w-4" />
+          </div>
+          <div class="toast-content">
+            {{ message }}
+          </div>
         </div>
       </div>
-    </div>
-  </Transition>
+    </Transition>
+  </Teleport>
 </template>
 
 <script setup lang="ts">
@@ -41,27 +43,36 @@ defineExpose({
 
 <style scoped>
 .toast-container {
-  @apply pointer-events-none fixed left-1/2 top-6 z-[100] flex max-w-[calc(100vw-32px)] -translate-x-1/2 justify-center px-4;
+  @apply pointer-events-none fixed left-1/2 top-6 z-[10000] flex max-w-[calc(100vw-32px)] -translate-x-1/2 justify-center px-4;
 }
 
 .toast {
-  @apply flex min-h-11 min-w-[240px] max-w-[680px] items-center gap-2 rounded-2xl border px-4 py-2.5 text-sm shadow-2xl backdrop-blur-xl;
+  @apply flex min-h-11 min-w-[240px] max-w-[680px] items-center gap-2 rounded-2xl border px-4 py-2.5 text-sm backdrop-blur-xl;
+  box-shadow: var(--hr-shadow-floating);
 }
 
 .toast-success {
-  @apply border-emerald-300/25 bg-[#0d1b16]/95 text-emerald-100;
+  border-color: var(--hr-success-border);
+  background: color-mix(in srgb, var(--hr-success) 12%, var(--hr-panel));
+  color: var(--hr-success);
 }
 
 .toast-error {
-  @apply border-red-300/25 bg-[#230f12]/95 text-red-100;
+  border-color: var(--hr-danger-border);
+  background: color-mix(in srgb, var(--hr-danger) 12%, var(--hr-panel));
+  color: var(--hr-danger);
 }
 
 .toast-info {
-  @apply border-cyan-200/20 bg-[#0b181b]/95 text-cyan-50;
+  border-color: var(--hr-info-border);
+  background: color-mix(in srgb, var(--hr-info) 12%, var(--hr-panel));
+  color: var(--hr-info);
 }
 
 .toast-warning {
-  @apply border-yellow-200/25 bg-[#221b0a]/95 text-yellow-100;
+  border-color: var(--hr-warning-border);
+  background: color-mix(in srgb, var(--hr-warning) 12%, var(--hr-panel));
+  color: var(--hr-warning);
 }
 
 .toast-icon {

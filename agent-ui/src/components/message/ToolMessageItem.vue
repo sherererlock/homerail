@@ -43,8 +43,8 @@ const timestamp = computed(() => {
 })
 
 const dotColor = computed(() => {
-  if (props.isError === true) return '#ef4444'
-  return '#22c55e'
+  if (props.isError === true) return 'var(--hr-danger)'
+  return 'var(--hr-success)'
 })
 
 const displayName = computed(() => props.rendered?.displayName || props.toolName)
@@ -175,13 +175,13 @@ function toggleExpand() {
 .tool-name {
   font-size: 15px;
   font-weight: 600;
-  color: #ffffff;
+  color: var(--hr-text-1);
   white-space: nowrap;
 }
 
 .tool-summary {
   font-size: 14px;
-  color: #94a3b8;
+  color: var(--hr-text-3);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -234,20 +234,20 @@ function toggleExpand() {
 }
 
 .tool-input {
-  background: rgba(59, 130, 246, 0.1);
-  border: 1px solid rgba(59, 130, 246, 0.3);
-  color: #bfdbfe;
+  background: var(--hr-accent-soft);
+  border: 1px solid var(--hr-accent-border);
+  color: var(--hr-accent);
 }
 
 .tool-result {
-  background: rgba(34, 197, 94, 0.1);
-  border: 1px solid rgba(34, 197, 94, 0.3);
-  color: #86efac;
+  background: var(--hr-success-soft);
+  border: 1px solid var(--hr-success-border);
+  color: var(--hr-success);
 }
 
 .tool-result.is-error {
-  background: rgba(239, 68, 68, 0.1);
-  border: 1px solid rgba(239, 68, 68, 0.3);
-  color: #fca5a5;
+  background: var(--hr-danger-soft);
+  border: 1px solid var(--hr-danger-border);
+  color: var(--hr-danger);
 }
 </style>

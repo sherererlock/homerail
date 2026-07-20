@@ -199,53 +199,53 @@ onUnmounted(() => {
 
 <template>
   <div class="flex h-full min-h-0 flex-col">
-    <div class="flex-shrink-0 border-b border-gray-800/40 px-3 py-2">
+    <div class="flex-shrink-0 border-b border-[var(--hr-border)] px-3 py-2">
       <div class="flex items-center justify-between gap-3">
-        <div class="flex items-center gap-1.5 text-[11px] font-medium text-gray-300">
-          <GitPullRequest class="h-3.5 w-3.5 text-emerald-300" />
+        <div class="flex items-center gap-1.5 text-[11px] font-medium text-[var(--hr-text-1)]">
+          <GitPullRequest class="h-3.5 w-3.5 text-[var(--hr-success)]" />
           {{ t('agent.artifacts.title') }}
         </div>
-        <div v-if="loading" class="flex items-center gap-1 text-[10px] text-gray-500">
+        <div v-if="loading" class="flex items-center gap-1 text-[10px] text-[var(--hr-text-3)]">
           <Loader2 class="h-3 w-3 animate-spin" />
           {{ t('agent.artifacts.loading') }}
         </div>
       </div>
-      <div v-if="error" class="mt-2 rounded border border-red-500/30 bg-red-500/10 px-2 py-1 text-[10px] text-red-200">
+      <div v-if="error" class="mt-2 rounded border border-[var(--hr-danger-border)] bg-[var(--hr-danger-soft)] px-2 py-1 text-[10px] text-[var(--hr-danger)]">
         {{ error }}
       </div>
     </div>
 
     <div class="min-h-0 flex-1 overflow-y-auto p-3">
       <div class="space-y-3">
-        <section class="rounded-md border border-gray-800/60 bg-gray-950/30 p-3">
-          <div class="mb-2 flex items-center gap-1.5 text-[10px] text-gray-500">
+        <section class="rounded-md border border-[var(--hr-border)] bg-[var(--hr-surface-1)] p-3">
+          <div class="mb-2 flex items-center gap-1.5 text-[10px] text-[var(--hr-text-3)]">
             <GitBranch class="h-3 w-3" />
             {{ t('agent.artifacts.branch') }}
           </div>
           <div class="space-y-1 text-[11px]">
             <div class="flex items-center justify-between gap-2">
-              <span class="text-gray-500">{{ t('agent.artifacts.current') }}</span>
-              <span class="truncate font-mono text-gray-200">{{ summary.branch || t('agent.artifacts.unavailable') }}</span>
+              <span class="text-[var(--hr-text-3)]">{{ t('agent.artifacts.current') }}</span>
+              <span class="truncate font-mono text-[var(--hr-text-1)]">{{ summary.branch || t('agent.artifacts.unavailable') }}</span>
             </div>
             <div class="flex items-center justify-between gap-2">
-              <span class="text-gray-500">{{ t('agent.artifacts.base') }}</span>
-              <span class="truncate font-mono text-gray-400">{{ summary.baseBranch || t('agent.artifacts.unavailable') }}</span>
+              <span class="text-[var(--hr-text-3)]">{{ t('agent.artifacts.base') }}</span>
+              <span class="truncate font-mono text-[var(--hr-text-2)]">{{ summary.baseBranch || t('agent.artifacts.unavailable') }}</span>
             </div>
           </div>
         </section>
 
-        <section class="rounded-md border border-gray-800/60 bg-gray-950/30 p-3">
+        <section class="rounded-md border border-[var(--hr-border)] bg-[var(--hr-surface-1)] p-3">
           <div class="mb-2 flex items-center justify-between gap-2">
-            <div class="flex items-center gap-1.5 text-[10px] text-gray-500">
+            <div class="flex items-center gap-1.5 text-[10px] text-[var(--hr-text-3)]">
               <GitPullRequest class="h-3 w-3" />
               {{ t('agent.artifacts.pullRequest') }}
             </div>
             <span
               :class="cn(
                 'rounded-full px-2 py-0.5 text-[10px]',
-                summary.reviewStatus === 'approved' ? 'bg-emerald-500/15 text-emerald-300' :
-                summary.reviewStatus === 'changes_requested' ? 'bg-red-500/15 text-red-300' :
-                'bg-gray-800 text-gray-500'
+                summary.reviewStatus === 'approved' ? 'bg-[var(--hr-success-soft)] text-[var(--hr-success)]' :
+                summary.reviewStatus === 'changes_requested' ? 'bg-[var(--hr-danger-soft)] text-[var(--hr-danger)]' :
+                'bg-[var(--hr-surface-2)] text-[var(--hr-text-3)]'
               )"
             >
               {{ t(`agent.artifacts.review.${summary.reviewStatus}`) }}
@@ -256,16 +256,16 @@ onUnmounted(() => {
             :href="primaryPrUrl"
             target="_blank"
             rel="noreferrer"
-            class="flex items-center gap-1.5 truncate text-[11px] text-blue-300 hover:text-blue-200"
+            class="flex items-center gap-1.5 truncate text-[11px] text-[var(--hr-info)] hover:text-[var(--hr-info)]"
           >
             <ExternalLink class="h-3 w-3 flex-shrink-0" />
             <span class="truncate">{{ primaryPrUrl }}</span>
           </a>
-          <div v-else class="text-[11px] text-gray-600">{{ t('agent.artifacts.noPullRequest') }}</div>
+          <div v-else class="text-[11px] text-[var(--hr-text-4)]">{{ t('agent.artifacts.noPullRequest') }}</div>
         </section>
 
-        <section class="rounded-md border border-gray-800/60 bg-gray-950/30 p-3">
-          <div class="mb-2 flex items-center gap-1.5 text-[10px] text-gray-500">
+        <section class="rounded-md border border-[var(--hr-border)] bg-[var(--hr-surface-1)] p-3">
+          <div class="mb-2 flex items-center gap-1.5 text-[10px] text-[var(--hr-text-3)]">
             <MessageSquareText class="h-3 w-3" />
             {{ t('agent.artifacts.sourceIssue') }}
           </div>
@@ -274,39 +274,39 @@ onUnmounted(() => {
             :href="primaryIssueUrl"
             target="_blank"
             rel="noreferrer"
-            class="flex items-center gap-1.5 truncate text-[11px] text-blue-300 hover:text-blue-200"
+            class="flex items-center gap-1.5 truncate text-[11px] text-[var(--hr-info)] hover:text-[var(--hr-info)]"
           >
             <ExternalLink class="h-3 w-3 flex-shrink-0" />
             <span class="truncate">{{ primaryIssueUrl }}</span>
           </a>
-          <div v-else class="text-[11px] text-gray-600">{{ t('agent.artifacts.noIssue') }}</div>
-          <div v-if="summary.changeTitle" class="mt-2 line-clamp-2 text-[11px] text-gray-400">
+          <div v-else class="text-[11px] text-[var(--hr-text-4)]">{{ t('agent.artifacts.noIssue') }}</div>
+          <div v-if="summary.changeTitle" class="mt-2 line-clamp-2 text-[11px] text-[var(--hr-text-2)]">
             {{ summary.changeTitle }}
           </div>
         </section>
 
-        <section class="rounded-md border border-gray-800/60 bg-gray-950/30 p-3">
+        <section class="rounded-md border border-[var(--hr-border)] bg-[var(--hr-surface-1)] p-3">
           <div class="mb-2 flex items-center justify-between gap-2">
-            <div class="flex items-center gap-1.5 text-[10px] text-gray-500">
+            <div class="flex items-center gap-1.5 text-[10px] text-[var(--hr-text-3)]">
               <FileCode2 class="h-3 w-3" />
               {{ t('agent.artifacts.changedFiles') }}
             </div>
-            <span class="text-[10px] text-gray-600">{{ summary.changedFiles.length }}</span>
+            <span class="text-[10px] text-[var(--hr-text-4)]">{{ summary.changedFiles.length }}</span>
           </div>
           <div v-if="summary.changedFiles.length" class="space-y-1">
             <div
               v-for="file in summary.changedFiles"
               :key="file"
-              class="truncate rounded bg-gray-900/70 px-2 py-1 font-mono text-[10px] text-gray-300"
+              class="truncate rounded bg-[var(--hr-surface-2)] px-2 py-1 font-mono text-[10px] text-[var(--hr-text-1)]"
             >
               {{ file }}
             </div>
           </div>
-          <div v-else class="text-[11px] text-gray-600">{{ t('agent.artifacts.noChangedFiles') }}</div>
+          <div v-else class="text-[11px] text-[var(--hr-text-4)]">{{ t('agent.artifacts.noChangedFiles') }}</div>
         </section>
 
-        <section class="rounded-md border border-gray-800/60 bg-gray-950/30 p-3">
-          <div class="mb-2 flex items-center gap-1.5 text-[10px] text-gray-500">
+        <section class="rounded-md border border-[var(--hr-border)] bg-[var(--hr-surface-1)] p-3">
+          <div class="mb-2 flex items-center gap-1.5 text-[10px] text-[var(--hr-text-3)]">
             <ScrollText class="h-3 w-3" />
             {{ t('agent.artifacts.moreLinks') }}
           </div>
@@ -317,12 +317,12 @@ onUnmounted(() => {
               :href="url"
               target="_blank"
               rel="noreferrer"
-              class="flex items-center gap-1.5 truncate text-[10px] text-blue-300 hover:text-blue-200"
+              class="flex items-center gap-1.5 truncate text-[10px] text-[var(--hr-info)] hover:text-[var(--hr-info)]"
             >
               <ExternalLink class="h-3 w-3 flex-shrink-0" />
               <span class="truncate">{{ url }}</span>
             </a>
-            <div v-if="summary.prUrls.length + summary.issueUrls.length <= 1" class="text-[11px] text-gray-600">
+            <div v-if="summary.prUrls.length + summary.issueUrls.length <= 1" class="text-[11px] text-[var(--hr-text-4)]">
               {{ t('agent.artifacts.noMoreLinks') }}
             </div>
           </div>

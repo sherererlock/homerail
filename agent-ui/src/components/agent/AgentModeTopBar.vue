@@ -25,8 +25,8 @@ const emit = defineEmits<{
 
 function modeClass(mode: 'text' | 'voice'): string {
   return props.activeMode === mode
-    ? 'bg-cyan-300 text-black shadow-[0_0_20px_rgba(103,232,249,0.18)]'
-    : 'text-white/58 hover:bg-white/10 hover:text-white'
+    ? 'bg-[var(--hr-accent)] text-[var(--hr-on-accent)] shadow-[0_0_20px_color-mix(in_srgb,var(--hr-accent)_18%,transparent)]'
+    : 'text-[var(--hr-text-2)] hover:bg-[var(--hr-surface-2)] hover:text-[var(--hr-text-1)]'
 }
 
 interface ActiveRunsResponse {
@@ -168,12 +168,12 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <header class="agent-mode-topbar flex h-14 flex-shrink-0 items-center justify-between rounded-full border border-cyan-200/14 bg-black/30 px-3 shadow-2xl backdrop-blur-xl">
+  <header class="agent-mode-topbar flex h-14 flex-shrink-0 items-center justify-between rounded-full border border-[var(--hr-border)] bg-[var(--hr-panel)] px-3 shadow-2xl backdrop-blur-xl">
     <div class="agent-mode-topbar__left flex min-w-0 items-center gap-3 overflow-x-auto">
-      <div class="agent-mode-topbar__brand hidden px-2 text-[11px] font-medium tracking-[0.22em] text-cyan-200/48 sm:block">
+      <div class="agent-mode-topbar__brand hidden px-2 text-[11px] font-medium tracking-[0.22em] text-[var(--hr-text-3)] sm:block">
         HomeRail
       </div>
-      <div v-if="!voiceOnly" class="agent-mode-topbar__mode flex h-10 items-center rounded-full border border-cyan-200/14 bg-white/[0.035] p-1">
+      <div v-if="!voiceOnly" class="agent-mode-topbar__mode flex h-10 items-center rounded-full border border-[var(--hr-border)] bg-[var(--hr-surface-1)] p-1">
         <button
           class="h-8 rounded-full px-3 text-xs font-medium transition-colors"
           :class="modeClass('text')"
@@ -198,7 +198,7 @@ onBeforeUnmount(() => {
       <slot name="right" />
       <button
         v-if="downloadedUpdate"
-        class="flex h-9 items-center gap-2 rounded-full border border-cyan-200/35 bg-cyan-300/14 px-3 text-sm font-medium text-cyan-50 shadow-[0_0_18px_rgba(103,232,249,0.18)] transition-colors hover:bg-cyan-300/20"
+        class="flex h-9 items-center gap-2 rounded-full border border-[var(--hr-accent-border)] bg-[var(--hr-accent-soft)] px-3 text-sm font-medium text-[var(--hr-accent)] transition-colors hover:opacity-85"
         :title="updateButtonTitle"
         type="button"
         @click="installDesktopUpdate"
@@ -208,12 +208,12 @@ onBeforeUnmount(() => {
       </button>
       <button
         v-if="showRuntime"
-        class="flex h-9 items-center gap-2 rounded-full border px-3 text-sm transition-colors hover:bg-cyan-200/10 hover:text-white"
+        class="flex h-9 items-center gap-2 rounded-full border px-3 text-sm transition-colors hover:bg-[var(--hr-surface-2)] hover:text-[var(--hr-text-1)]"
         :class="hasActiveRuns
-          ? 'border-emerald-300/45 bg-emerald-300/10 text-emerald-100 shadow-[0_0_18px_rgba(52,211,153,0.16)]'
+          ? 'border-[var(--hr-success-border)] bg-[var(--hr-success-soft)] text-[var(--hr-success)] shadow-[0_0_18px_var(--hr-success-soft)]'
           : hasWaitingRuns
-            ? 'border-amber-300/40 bg-amber-300/10 text-amber-100'
-            : 'border-cyan-200/14 text-white/60'"
+            ? 'border-[var(--hr-warning-border)] bg-[var(--hr-warning-soft)] text-[var(--hr-warning)]'
+            : 'border-[var(--hr-border)] text-[var(--hr-text-2)]'"
         :data-state="hasActiveRuns ? 'active' : hasWaitingRuns ? 'waiting' : 'idle'"
         data-testid="dag-runtime-button"
         :title="runtimeTitle"
@@ -228,15 +228,15 @@ onBeforeUnmount(() => {
           v-if="runtimeRunCount > 0"
           class="min-w-5 rounded-full border px-1.5 text-center text-[11px] font-semibold leading-5"
           :class="hasActiveRuns
-            ? 'border-emerald-200/35 bg-emerald-300/15 text-emerald-50'
-            : 'border-amber-200/35 bg-amber-300/15 text-amber-50'"
+            ? 'border-[var(--hr-success-border)] bg-[var(--hr-success-soft)] text-[var(--hr-success)]'
+            : 'border-[var(--hr-warning-border)] bg-[var(--hr-warning-soft)] text-[var(--hr-warning)]'"
         >
           {{ runtimeRunCount }}
         </span>
       </button>
       <button
         v-if="showDetails"
-        class="flex h-9 items-center gap-2 rounded-full border border-cyan-200/14 px-3 text-sm text-white/60 transition-colors hover:bg-cyan-200/10 hover:text-white"
+        class="flex h-9 items-center gap-2 rounded-full border border-[var(--hr-border)] px-3 text-sm text-[var(--hr-text-2)] transition-colors hover:bg-[var(--hr-surface-2)] hover:text-[var(--hr-text-1)]"
         :title="detailsOpen ? t('shell.details.hide') : t('shell.details.show')"
         type="button"
         @click="emit('toggleDetails')"
@@ -247,7 +247,7 @@ onBeforeUnmount(() => {
       </button>
       <button
         v-if="showSettings"
-        class="flex h-9 items-center gap-2 rounded-full border border-cyan-200/14 px-3 text-sm text-white/60 transition-colors hover:bg-cyan-200/10 hover:text-white"
+        class="flex h-9 items-center gap-2 rounded-full border border-[var(--hr-border)] px-3 text-sm text-[var(--hr-text-2)] transition-colors hover:bg-[var(--hr-surface-2)] hover:text-[var(--hr-text-1)]"
         data-testid="agent-mode-settings-button"
         type="button"
         @click="emit('openSettings')"

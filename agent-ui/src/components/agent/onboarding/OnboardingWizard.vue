@@ -16,10 +16,14 @@ import { useI18n } from 'vue-i18n'
 import { Check, Sparkles, ArrowRight, Terminal, Mic, Volume2, X, FolderCheck, RefreshCw } from 'lucide-vue-next'
 import { useAgentStore } from '@/stores/agent-store'
 import { useOnboardingStatus } from '@/composables/useOnboardingStatus'
+import { useToast } from '@/components/controls/useToast'
 import { listProviders, agentSettingsApi } from '@/api/agent'
 import { probeDockerWorkspaceMount, type DockerWorkspaceProbeResult } from '@/api/services/voice-agent-api'
 import { cn } from '@/lib/utils'
-import { isKimiProviderId } from '@/lib/model-runtime'
+import {
+  isKimiCodeCompatibleModelSetting,
+  type ManagerAgentHarness,
+} from 'homerail-protocol'
 import type { Provider } from '@/api/types/orchestration-v2.types'
 import type { LLMSetting } from '@/api/services/llm-settings-api'
 import OnboardingStepForm from './OnboardingStepForm.vue'
@@ -37,6 +41,7 @@ const emit = defineEmits<{
 
 const store = useAgentStore()
 const { t } = useI18n()
+const { showToast } = useToast()
 const { status, refresh } = useOnboardingStatus()
 
 const providers = ref<Provider[]>([])
@@ -147,7 +152,6 @@ function maybeFinish(): void {
 
 // ── 交互 ──────────────────────────────────────────────────────
 async function onCreated(setting?: LLMSetting): Promise<void> {
-  await applyCreatedManagerAgentSetting(setting)
   await Promise.all([
     refresh(),
     loadExistingSettings(),
@@ -221,31 +225,59 @@ function isDedicatedManagerAgentSetting(setting: LLMSetting | undefined): settin
 
 const existingManagerAgentSettings = computed(() => existingSettings.value.filter(isDedicatedManagerAgentSetting))
 
-function harnessForManagerAgentSetting(setting: LLMSetting): 'kimi_code' | 'claude_agent_sdk' {
-  return isKimiProviderId(setting.provider_id) ? 'kimi_code' : 'claude_agent_sdk'
+function harnessForManagerAgentSetting(
+  setting: LLMSetting,
+  detectedHarness?: Extract<ManagerAgentHarness, 'claude_agent_sdk' | 'kimi_code'>,
+): 'kimi_code' | 'claude_agent_sdk' {
+  if (detectedHarness) return detectedHarness
+  // Persisted dual-protocol settings prefer Claude, matching runtime detection.
+  if (setting.anthropic_base_url || setting.protocol === 'anthropic_compatible') {
+    return 'claude_agent_sdk'
+  }
+  return isKimiCodeCompatibleModelSetting({
+    providerId: setting.provider_id,
+    providerSource: setting.provider_source,
+    planType: setting.plan_type,
+    protocol: setting.protocol,
+    endpointId: setting.endpoint_id,
+    endpointName: setting.endpoint_name,
+  }) ? 'kimi_code' : 'claude_agent_sdk'
 }
 
-async function applyCreatedManagerAgentSetting(setting: LLMSetting | undefined): Promise<void> {
+async function configureManagerAgentSetting(
+  setting: LLMSetting,
+  detectedHarness?: Extract<ManagerAgentHarness, 'claude_agent_sdk' | 'kimi_code'>,
+): Promise<void> {
+  const harness = harnessForManagerAgentSetting(setting, detectedHarness)
+  await agentSettingsApi.updateVoiceAgentConfig({
+    harness,
+    llm_setting_id: setting.id,
+    provider_name: setting.provider_id,
+    model_name: setting.model_name,
+  })
+}
+
+async function activateCreatedManagerAgentSetting(
+  setting: LLMSetting,
+  detectedHarness?: Extract<ManagerAgentHarness, 'claude_agent_sdk' | 'kimi_code'>,
+): Promise<void> {
   if (currentStep.value.id !== 'agent' || !isDedicatedManagerAgentSetting(setting)) return
-  await applyExistingManagerAgentSetting(setting)
+  await configureManagerAgentSetting(setting, detectedHarness)
 }
 
 async function applyExistingManagerAgentSetting(setting: LLMSetting): Promise<void> {
   applyingExistingAgentId.value = setting.id
   try {
-    const harness = harnessForManagerAgentSetting(setting)
-    await agentSettingsApi.updateVoiceAgentConfig({
-      harness,
-      llm_setting_id: setting.id,
-      provider_name: setting.provider_id,
-      model_name: setting.model_name,
-    })
+    await configureManagerAgentSetting(setting)
     await Promise.all([
       refresh(),
       loadExistingSettings(),
     ])
     await store.loadManagerRuntimeOptions()
     advanceIfDone()
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    showToast(message, 'error', 6000)
   } finally {
     applyingExistingAgentId.value = null
   }
@@ -351,13 +383,13 @@ watch(activePane, (pane) => {
         <!-- 当前阶段内容 -->
         <section v-if="activePane === 'models'" class="onboarding-wizard__body">
           <div class="onboarding-wizard__body-title">
-            <component :is="currentStep.icon" class="h-4 w-4 text-cyan-300" />
+            <component :is="currentStep.icon" class="h-4 w-4 text-[var(--hr-accent)]" />
             <span>{{ currentStep.title }}</span>
             <em>{{ currentStep.subtitle }}</em>
           </div>
 
           <div v-if="currentStep.id === 'agent' && agentRuntimeReady" class="onboarding-wizard__ready">
-            <Check class="h-5 w-5 text-emerald-400" />
+            <Check class="h-5 w-5 text-[var(--hr-success)]" />
             <div>
               <div class="onboarding-wizard__ready-title">{{ t('onboarding.runtime.ready') }}</div>
               <div class="onboarding-wizard__ready-hint">{{ t('onboarding.runtime.currentHarness', { harness: status.managerAgentHarness || 'manager_agent' }) }}</div>
@@ -392,13 +424,14 @@ watch(activePane, (pane) => {
               :capability="currentStep.capability"
               :providers="providers"
               :existing-settings="existingSettings"
+              :activate-setting="activateCreatedManagerAgentSetting"
               @created="onCreated"
             />
           </template>
 
           <!-- ASR / TTS 阶段：已完成 -->
           <div v-else-if="stepStatus(currentStep.id) === 'done'" class="onboarding-wizard__ready">
-            <Check class="h-5 w-5 text-emerald-400" />
+            <Check class="h-5 w-5 text-[var(--hr-success)]" />
             <div>
               <div class="onboarding-wizard__ready-title">{{ t('onboarding.runtime.stepReady', { step: currentStep.title }) }}</div>
               <div class="onboarding-wizard__ready-hint">{{ t('onboarding.runtime.nextAvailable') }}</div>
@@ -411,6 +444,7 @@ watch(activePane, (pane) => {
               :capability="currentStep.capability"
               :providers="providers"
               :existing-settings="existingSettings"
+              :activate-setting="activateCreatedManagerAgentSetting"
               @created="onCreated"
             />
           </template>
@@ -418,13 +452,13 @@ watch(activePane, (pane) => {
 
         <section v-else class="onboarding-wizard__body">
           <div class="onboarding-wizard__body-title">
-            <Terminal class="h-4 w-4 text-cyan-300" />
+            <Terminal class="h-4 w-4 text-[var(--hr-accent)]" />
             <span>{{ t('onboarding.environment') }}</span>
             <em>{{ t('onboarding.environmentCheck.description') }}</em>
           </div>
 
           <div v-if="hostShellRequired" class="onboarding-wizard__docker-check">
-            <Terminal :class="cn('h-5 w-5', hostShellReady ? 'text-emerald-400' : 'text-cyan-300')" />
+            <Terminal :class="cn('h-5 w-5', hostShellReady ? 'text-[var(--hr-success)]' : 'text-[var(--hr-accent)]')" />
             <div class="onboarding-wizard__docker-check-copy">
               <div class="onboarding-wizard__docker-check-title">Git Bash / host-shell</div>
               <div class="onboarding-wizard__docker-check-hint">{{ hostShellMessage }}</div>
@@ -435,7 +469,7 @@ watch(activePane, (pane) => {
           </div>
 
           <div class="onboarding-wizard__docker-check">
-            <FolderCheck :class="cn('h-5 w-5', dockerWorkspaceReady ? 'text-emerald-400' : 'text-cyan-300')" />
+            <FolderCheck :class="cn('h-5 w-5', dockerWorkspaceReady ? 'text-[var(--hr-success)]' : 'text-[var(--hr-accent)]')" />
             <div class="onboarding-wizard__docker-check-copy">
               <div class="onboarding-wizard__docker-check-title">{{ t('onboarding.environmentCheck.dockerTitle') }}</div>
               <div class="onboarding-wizard__docker-check-hint">{{ dockerWorkspaceMessage }}</div>
@@ -531,7 +565,7 @@ watch(activePane, (pane) => {
 .onboarding-wizard-overlay__scrim {
   position: absolute;
   inset: 0;
-  background: rgba(0, 0, 0, 0.42);
+  background: var(--hr-overlay);
   backdrop-filter: blur(4px);
   -webkit-backdrop-filter: blur(4px);
 }
@@ -546,9 +580,9 @@ watch(activePane, (pane) => {
   display: flex;
   flex-direction: column;
   border-radius: 22px;
-  border: 1px solid rgba(103, 232, 249, 0.18);
-  background: rgba(7, 13, 18, 0.94);
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.03), 0 30px 90px rgba(0, 0, 0, 0.55);
+  border: 1px solid var(--hr-accent-border);
+  background: var(--hr-panel);
+  box-shadow: var(--hr-shadow-floating);
   backdrop-filter: blur(24px);
   -webkit-backdrop-filter: blur(24px);
 }
@@ -559,7 +593,7 @@ watch(activePane, (pane) => {
   align-items: center;
   justify-content: space-between;
   padding: 1rem 1.25rem;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid var(--hr-border);
 }
 
 .onboarding-wizard__title {
@@ -575,20 +609,20 @@ watch(activePane, (pane) => {
   height: 2rem;
   width: 2rem;
   border-radius: 0.6rem;
-  border: 1px solid rgba(103, 232, 249, 0.25);
-  background: rgba(103, 232, 249, 0.1);
-  color: rgba(103, 232, 249, 0.95);
+  border: 1px solid var(--hr-accent-border);
+  background: var(--hr-accent-soft);
+  color: var(--hr-accent);
 }
 
 .onboarding-wizard__title h2 {
   font-size: 0.95rem;
   font-weight: 600;
-  color: rgba(255, 255, 255, 0.92);
+  color: var(--hr-text-1);
 }
 
 .onboarding-wizard__title p {
   font-size: 0.72rem;
-  color: rgba(255, 255, 255, 0.42);
+  color: var(--hr-text-3);
   margin-top: 0.1rem;
 }
 
@@ -599,13 +633,13 @@ watch(activePane, (pane) => {
   height: 2rem;
   width: 2rem;
   border-radius: 0.5rem;
-  color: rgba(255, 255, 255, 0.4);
+  color: var(--hr-text-3);
   transition: color 160ms ease, background 160ms ease;
 }
 
 .onboarding-wizard__close:hover {
-  color: rgba(255, 255, 255, 0.85);
-  background: rgba(255, 255, 255, 0.06);
+  color: var(--hr-text-1);
+  background: var(--hr-control-hover);
 }
 
 .onboarding-wizard__tabs {
@@ -623,24 +657,24 @@ watch(activePane, (pane) => {
   min-width: 6.5rem;
   padding: 0.42rem 0.85rem;
   border-radius: 0.55rem;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  color: rgba(255, 255, 255, 0.58);
+  border: 1px solid var(--hr-border);
+  color: var(--hr-text-2);
   font-size: 0.76rem;
   transition: background 160ms ease, border-color 160ms ease, color 160ms ease;
 }
 
 .onboarding-wizard__tab--active {
-  border-color: rgba(103, 232, 249, 0.36);
-  background: rgba(103, 232, 249, 0.08);
-  color: rgba(255, 255, 255, 0.9);
+  border-color: var(--hr-accent-border);
+  background: var(--hr-accent-soft);
+  color: var(--hr-text-1);
 }
 
 .onboarding-wizard__tab-dot {
   height: 0.42rem;
   width: 0.42rem;
   border-radius: 9999px;
-  background: rgb(251, 191, 36);
-  box-shadow: 0 0 0 3px rgba(251, 191, 36, 0.14);
+  background: var(--hr-warning);
+  box-shadow: 0 0 0 3px var(--hr-warning-soft);
 }
 
 /* Stepper */
@@ -649,7 +683,7 @@ watch(activePane, (pane) => {
   align-items: stretch;
   gap: 0.4rem;
   padding: 0.75rem 1.25rem;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid var(--hr-border);
 }
 
 .onboarding-wizard__step {
@@ -659,20 +693,20 @@ watch(activePane, (pane) => {
   gap: 0.5rem;
   padding: 0.5rem 0.7rem;
   border-radius: 0.6rem;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--hr-border);
+  background: var(--hr-surface-1);
   transition: border-color 160ms ease, background 160ms ease;
   text-align: left;
 }
 
 .onboarding-wizard__step--active {
-  border-color: rgba(103, 232, 249, 0.45);
-  background: rgba(103, 232, 249, 0.08);
+  border-color: var(--hr-accent-border);
+  background: var(--hr-accent-soft);
 }
 
 .onboarding-wizard__step--done {
-  border-color: rgba(52, 211, 153, 0.35);
-  background: rgba(52, 211, 153, 0.06);
+  border-color: var(--hr-success-border);
+  background: var(--hr-success-soft);
 }
 
 .onboarding-wizard__step-index {
@@ -685,18 +719,18 @@ watch(activePane, (pane) => {
   border-radius: 9999px;
   font-size: 0.7rem;
   font-weight: 600;
-  background: rgba(255, 255, 255, 0.08);
-  color: rgba(255, 255, 255, 0.6);
+  background: var(--hr-control);
+  color: var(--hr-text-2);
 }
 
 .onboarding-wizard__step--active .onboarding-wizard__step-index {
-  background: rgba(103, 232, 249, 0.2);
-  color: rgba(207, 250, 254, 0.95);
+  background: color-mix(in srgb, var(--hr-accent) 20%, transparent);
+  color: var(--hr-text-1);
 }
 
 .onboarding-wizard__step--done .onboarding-wizard__step-index {
-  background: rgba(52, 211, 153, 0.2);
-  color: rgba(167, 243, 208, 0.95);
+  background: var(--hr-success-soft);
+  color: var(--hr-success);
 }
 
 .onboarding-wizard__step-text {
@@ -709,7 +743,7 @@ watch(activePane, (pane) => {
 .onboarding-wizard__step-text strong {
   font-size: 0.8rem;
   font-weight: 500;
-  color: rgba(255, 255, 255, 0.85);
+  color: var(--hr-text-1);
 }
 
 .onboarding-wizard__step-optional {
@@ -717,8 +751,8 @@ watch(activePane, (pane) => {
   font-style: normal;
   padding: 0.05rem 0.35rem;
   border-radius: 9999px;
-  background: rgba(255, 255, 255, 0.08);
-  color: rgba(255, 255, 255, 0.4);
+  background: var(--hr-control);
+  color: var(--hr-text-3);
 }
 
 /* Body */
@@ -737,23 +771,23 @@ watch(activePane, (pane) => {
   gap: 0.5rem;
   font-size: 0.85rem;
   font-weight: 500;
-  color: rgba(255, 255, 255, 0.9);
+  color: var(--hr-text-1);
 }
 
 .onboarding-wizard__body-title em {
   font-size: 0.72rem;
   font-weight: 400;
   font-style: normal;
-  color: rgba(255, 255, 255, 0.4);
+  color: var(--hr-text-3);
   margin-left: 0.2rem;
 }
 
 .onboarding-wizard__codex-hint {
   padding: 0.6rem 0.75rem;
   border-radius: 0.6rem;
-  background: rgba(251, 191, 36, 0.06);
-  border: 1px solid rgba(251, 191, 36, 0.18);
-  color: rgba(254, 243, 199, 0.8);
+  background: var(--hr-warning-soft);
+  border: 1px solid var(--hr-warning-border);
+  color: var(--hr-warning);
   font-size: 0.75rem;
   line-height: 1.5;
 }
@@ -764,7 +798,7 @@ watch(activePane, (pane) => {
 }
 
 .onboarding-wizard__existing-title {
-  color: rgba(255, 255, 255, 0.5);
+  color: var(--hr-text-3);
   font-size: 0.72rem;
   font-weight: 700;
 }
@@ -777,15 +811,15 @@ watch(activePane, (pane) => {
   width: 100%;
   padding: 0.65rem 0.72rem;
   border-radius: 0.6rem;
-  border: 1px solid rgba(103, 232, 249, 0.18);
-  background: rgba(34, 211, 238, 0.06);
-  color: rgba(255, 255, 255, 0.9);
+  border: 1px solid color-mix(in srgb, var(--hr-accent) 18%, transparent);
+  background: var(--hr-accent-soft);
+  color: var(--hr-text-1);
   text-align: left;
 }
 
 .onboarding-wizard__existing-agent:not(:disabled):hover {
-  border-color: rgba(103, 232, 249, 0.36);
-  background: rgba(34, 211, 238, 0.1);
+  border-color: var(--hr-accent-border);
+  background: color-mix(in srgb, var(--hr-accent) 16%, transparent);
 }
 
 .onboarding-wizard__existing-agent:disabled {
@@ -811,14 +845,14 @@ watch(activePane, (pane) => {
 }
 
 .onboarding-wizard__existing-agent em {
-  color: rgba(255, 255, 255, 0.48);
+  color: var(--hr-text-3);
   font-size: 0.68rem;
   font-style: normal;
 }
 
 .onboarding-wizard__existing-action {
   flex: 0 0 auto;
-  color: #67e8f9;
+  color: var(--hr-accent);
   font-size: 0.72rem;
   font-weight: 800;
 }
@@ -835,10 +869,10 @@ watch(activePane, (pane) => {
   align-items: center;
   padding: 0.55rem 0.65rem;
   border-radius: 0.55rem;
-  border: 1px solid rgba(251, 191, 36, 0.16);
-  background: rgba(251, 191, 36, 0.05);
+  border: 1px solid var(--hr-warning-border);
+  background: var(--hr-warning-soft);
   font-size: 0.72rem;
-  color: rgba(254, 243, 199, 0.82);
+  color: var(--hr-warning);
 }
 
 .onboarding-wizard__blocker span {
@@ -847,7 +881,7 @@ watch(activePane, (pane) => {
 }
 
 .onboarding-wizard__blocker code {
-  color: rgba(255, 255, 255, 0.42);
+  color: var(--hr-text-3);
   font-size: 0.66rem;
 }
 
@@ -858,8 +892,8 @@ watch(activePane, (pane) => {
   gap: 0.65rem;
   padding: 0.7rem 0.8rem;
   border-radius: 0.7rem;
-  border: 1px solid rgba(103, 232, 249, 0.18);
-  background: rgba(34, 211, 238, 0.05);
+  border: 1px solid color-mix(in srgb, var(--hr-accent) 18%, transparent);
+  background: color-mix(in srgb, var(--hr-accent) 5%, transparent);
 }
 
 .onboarding-wizard__docker-check-copy {
@@ -869,7 +903,7 @@ watch(activePane, (pane) => {
 .onboarding-wizard__docker-check-title {
   font-size: 0.78rem;
   font-weight: 600;
-  color: rgba(255, 255, 255, 0.88);
+  color: var(--hr-text-1);
 }
 
 .onboarding-wizard__docker-check-hint {
@@ -877,7 +911,7 @@ watch(activePane, (pane) => {
   overflow-wrap: anywhere;
   font-size: 0.7rem;
   line-height: 1.35;
-  color: rgba(255, 255, 255, 0.52);
+  color: var(--hr-text-3);
 }
 
 .onboarding-wizard__docker-check-button {
@@ -888,15 +922,15 @@ watch(activePane, (pane) => {
   justify-content: center;
   padding: 0.42rem 0.65rem;
   border-radius: 9999px;
-  border: 1px solid rgba(103, 232, 249, 0.22);
-  color: rgba(207, 250, 254, 0.92);
+  border: 1px solid var(--hr-accent-border);
+  color: var(--hr-text-1);
   font-size: 0.72rem;
   transition: background 160ms ease, border-color 160ms ease;
 }
 
 .onboarding-wizard__docker-check-button:not(:disabled):hover {
-  border-color: rgba(103, 232, 249, 0.45);
-  background: rgba(103, 232, 249, 0.1);
+  border-color: color-mix(in srgb, var(--hr-accent) 45%, transparent);
+  background: var(--hr-accent-soft);
 }
 
 .onboarding-wizard__docker-check-button:disabled {
@@ -911,16 +945,16 @@ watch(activePane, (pane) => {
   min-width: 3.7rem;
   padding: 0.28rem 0.55rem;
   border-radius: 9999px;
-  border: 1px solid rgba(251, 191, 36, 0.25);
-  color: rgba(254, 243, 199, 0.85);
+  border: 1px solid var(--hr-warning-border);
+  color: var(--hr-warning);
   font-size: 0.7rem;
-  background: rgba(251, 191, 36, 0.06);
+  background: var(--hr-warning-soft);
 }
 
 .onboarding-wizard__check-pill--ready {
-  border-color: rgba(52, 211, 153, 0.28);
-  color: rgba(167, 243, 208, 0.92);
-  background: rgba(52, 211, 153, 0.07);
+  border-color: var(--hr-success-border);
+  color: var(--hr-success);
+  background: var(--hr-success-soft);
 }
 
 .onboarding-wizard__ready {
@@ -929,19 +963,19 @@ watch(activePane, (pane) => {
   gap: 0.6rem;
   padding: 0.8rem 0.9rem;
   border-radius: 0.7rem;
-  border: 1px solid rgba(52, 211, 153, 0.2);
-  background: rgba(52, 211, 153, 0.05);
+  border: 1px solid var(--hr-success-border);
+  background: var(--hr-success-soft);
 }
 
 .onboarding-wizard__ready-title {
   font-size: 0.82rem;
   font-weight: 500;
-  color: rgba(255, 255, 255, 0.9);
+  color: var(--hr-text-1);
 }
 
 .onboarding-wizard__ready-hint {
   font-size: 0.72rem;
-  color: rgba(255, 255, 255, 0.45);
+  color: var(--hr-text-3);
   margin-top: 0.15rem;
 }
 
@@ -951,7 +985,7 @@ watch(activePane, (pane) => {
   align-items: center;
   justify-content: space-between;
   padding: 0.85rem 1.25rem;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  border-top: 1px solid var(--hr-border);
 }
 
 .onboarding-wizard__footer-right {
@@ -963,15 +997,15 @@ watch(activePane, (pane) => {
 .onboarding-wizard__ghost {
   padding: 0.45rem 0.9rem;
   border-radius: 9999px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  color: rgba(255, 255, 255, 0.55);
+  border: 1px solid var(--hr-border);
+  color: var(--hr-text-2);
   font-size: 0.78rem;
   transition: background 160ms ease, color 160ms ease;
 }
 
 .onboarding-wizard__ghost:hover {
-  background: rgba(255, 255, 255, 0.05);
-  color: rgba(255, 255, 255, 0.85);
+  background: var(--hr-control-hover);
+  color: var(--hr-text-1);
 }
 
 .onboarding-wizard__primary {
@@ -980,25 +1014,25 @@ watch(activePane, (pane) => {
   gap: 0.35rem;
   padding: 0.45rem 1rem;
   border-radius: 9999px;
-  border: 1px solid rgba(103, 232, 249, 0.4);
-  background: rgba(103, 232, 249, 0.14);
-  color: rgba(207, 250, 254, 0.95);
+  border: 1px solid var(--hr-accent-border);
+  background: var(--hr-accent-soft);
+  color: var(--hr-text-1);
   font-size: 0.78rem;
   font-weight: 500;
   transition: background 160ms ease, transform 160ms ease;
 }
 
 .onboarding-wizard__primary:not(.onboarding-wizard__primary--disabled):hover {
-  background: rgba(103, 232, 249, 0.24);
+  background: color-mix(in srgb, var(--hr-accent) 24%, transparent);
   transform: translateY(-1px);
 }
 
 .onboarding-wizard__primary--disabled {
   opacity: 0.4;
   cursor: not-allowed;
-  border-color: rgba(255, 255, 255, 0.1);
-  background: rgba(255, 255, 255, 0.04);
-  color: rgba(255, 255, 255, 0.5);
+  border-color: var(--hr-border);
+  background: var(--hr-control);
+  color: var(--hr-text-3);
 }
 
 /* Transition */

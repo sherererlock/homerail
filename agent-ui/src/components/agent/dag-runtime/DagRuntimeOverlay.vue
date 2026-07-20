@@ -8,7 +8,7 @@
  * 渐进返回：○ detail→graph→list→退出。
  */
 
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAgentStore } from '@/stores/agent-store'
 import { useDagRuntime } from './useDagRuntime'
@@ -24,6 +24,11 @@ import type { VoiceGamepadButtonIntent, VoiceGamepadDirectionIntent } from '@/co
 
 type OverlayView = 'run_list' | 'dag_graph'
 
+const props = defineProps<{
+  initialRunId?: string
+  captureMode?: boolean
+}>()
+
 const emit = defineEmits<{
   close: []
 }>()
@@ -38,7 +43,7 @@ const selectedRunId = ref<string | null>(null)
 const focusedRunIndex = ref(0)
 const focusedNodeId = ref<string | null>(null)
 const selectedNodeId = ref<string | null>(null)
-const physicsPaused = ref(false)
+const physicsPaused = ref(Boolean(props.captureMode))
 const canvasRef = ref<InstanceType<typeof DagRuntimeCanvas> | null>(null)
 const drawerRef = ref<InstanceType<typeof DagNodeDetailDrawer> | null>(null)
 
@@ -166,13 +171,36 @@ function confirmRunFocus(): void {
   if (run) selectRun(run.runId)
 }
 
+let runLoadSequence = 0
+
 function selectRun(runId: string): void {
   selectedRunId.value = runId
-  // 加载该 run 的 DAG 拓扑到 store（活跃 run 实时更新，历史 run 静态）
-  void store.switchToRun(runId)
   view.value = 'dag_graph'
-  // 焦点初始化：第一个 running 节点，否则第一个节点
+  focusedNodeId.value = null
+  selectedNodeId.value = null
+  const sequence = ++runLoadSequence
+  void loadSelectedRun(runId, sequence)
+}
+
+async function loadSelectedRun(runId: string, sequence: number): Promise<void> {
+  await store.switchToRun(runId)
+  if (sequence !== runLoadSequence || selectedRunId.value !== runId) return
+  if (!store.dagExecution || store.nodes.length === 0) {
+    // A short display suffix or unknown id must not masquerade as an idle
+    // 0/0 graph. Return to the real run list, where only complete ids can be
+    // selected.
+    selectedRunId.value = null
+    view.value = 'run_list'
+    await refreshRuns()
+    return
+  }
   initNodeFocus()
+  await nextTick()
+  if (props.captureMode) {
+    physicsPaused.value = true
+    canvasRef.value?.fitCanvasGraph()
+    canvasRef.value?.freezeLayout()
+  }
 }
 
 // ============================================================================
@@ -244,8 +272,9 @@ function resetPanels(): void {
 const PANEL_ORDER: PanelKey[] = ['task', 'logs']
 
 /** 方块(■)：展开/折叠当前聚焦的面板 */
-function togglePanel(): void {
-  const cur = panelFocus.value
+function togglePanel(panel = panelFocus.value): void {
+  panelFocus.value = panel
+  const cur = panel
   const next = new Set(expandedPanels.value)
   if (next.has(cur)) next.delete(cur)
   else next.add(cur)
@@ -309,6 +338,16 @@ watch(physicsPaused, (paused) => {
   else canvasRef.value?.wakeLayout()
 })
 
+watch(
+  () => props.captureMode,
+  async (enabled) => {
+    if (!enabled) return
+    physicsPaused.value = true
+    await nextTick()
+    canvasRef.value?.freezeLayout()
+  },
+)
+
 // 列表加载后，焦点默认在第一个（或当前 run）
 watch(runs, (list) => {
   if (!list.length) return
@@ -325,11 +364,25 @@ watch(() => store.nodes.length, () => {
   if (view.value === 'dag_graph' && !focusedNodeId.value) initNodeFocus()
 })
 
-onMounted(() => {
+watch(
+  () => props.initialRunId,
+  (runId) => {
+    if (!runId || runId === selectedRunId.value) return
+    selectRun(runId)
+  },
+  { immediate: true },
+)
+
+onMounted(async () => {
   window.addEventListener('keydown', onKeydown)
+  if (props.captureMode) {
+    await nextTick()
+    canvasRef.value?.freezeLayout()
+  }
 })
 
 onUnmounted(() => {
+  runLoadSequence += 1
   window.removeEventListener('keydown', onKeydown)
   store.selectNode(null)
 })
@@ -337,9 +390,9 @@ onUnmounted(() => {
 
 <template>
   <transition name="overlay-zoom">
-    <div class="dag-runtime-overlay fixed inset-0 z-[200] flex flex-col overflow-hidden bg-[#06080a]">
+    <div class="dag-runtime-overlay fixed inset-0 z-[200] flex flex-col overflow-hidden bg-[var(--hr-bg)]">
       <!-- 氛围层 -->
-      <div class="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_22%_18%,rgba(80,227,230,0.12),transparent_38%),radial-gradient(circle_at_78%_72%,rgba(52,211,153,0.08),transparent_42%)]" />
+      <div class="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_22%_18%,var(--hr-canvas-ambient-primary),transparent_38%),radial-gradient(circle_at_78%_72%,var(--hr-canvas-ambient-secondary),transparent_42%)]" />
 
       <!-- 顶部工具栏（仅 graph 态显示完整工具栏；list 态显示精简版） -->
       <DagRuntimeToolbar
@@ -370,6 +423,7 @@ onUnmounted(() => {
           <DagRuntimeCanvas
             ref="canvasRef"
             :metrics="metrics"
+            :reduced-motion="captureMode"
             :focused-node-id="focusedNodeId"
             :selected-node-id="selectedNodeId"
             @select-node="(id) => { selectedNodeId = id; if (id) { store.selectNode(id); resetPanels() } }"
@@ -378,7 +432,7 @@ onUnmounted(() => {
 
           <div
             v-if="metricsLoading"
-            class="pointer-events-none absolute bottom-4 left-1/2 -translate-x-1/2 rounded-full border border-cyan-200/14 bg-black/50 px-3 py-1.5 text-[10px] text-white/50 backdrop-blur"
+            class="pointer-events-none absolute bottom-4 left-1/2 -translate-x-1/2 rounded-full border border-[var(--hr-border)] bg-[var(--hr-panel)] px-3 py-1.5 text-[10px] text-[var(--hr-text-3)] backdrop-blur"
           >
             {{ t('dag.overlay.loadingMetrics') }}
           </div>
@@ -393,13 +447,14 @@ onUnmounted(() => {
           :panel-focus="panelFocus"
           :expanded-panels="expandedPanels"
           @close="closeDetail"
+          @toggle-panel="togglePanel"
         />
       </template>
 
       <!-- 底部操作提示条（手柄连接时显示） -->
       <div
         v-if="gamepadConnected"
-        class="pointer-events-none absolute bottom-4 left-1/2 z-20 -translate-x-1/2 rounded-full border border-cyan-200/15 bg-black/65 px-6 py-2.5 text-sm text-white/60 backdrop-blur"
+        class="pointer-events-none absolute bottom-4 left-1/2 z-20 -translate-x-1/2 rounded-full border border-[var(--hr-border)] bg-[var(--hr-panel)] px-6 py-2.5 text-sm text-[var(--hr-text-2)] backdrop-blur"
       >
         <template v-if="view === 'run_list'">
           {{ t('dag.overlay.runListHelp') }}
@@ -417,7 +472,7 @@ onUnmounted(() => {
 
 <style scoped>
 .dag-runtime-overlay {
-  box-shadow: 0 0 120px rgba(0, 0, 0, 0.6);
+  box-shadow: var(--hr-shadow-floating);
 }
 
 .overlay-zoom-enter-active {

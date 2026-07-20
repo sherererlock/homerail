@@ -1,0 +1,165 @@
+/* ==========================================================================
+   HomeRail appearance token contract
+
+   Built-in and external appearances are registered in
+   appearance/appearance-registry.ts. An appearance owns only this semantic
+   token surface; components must never branch on an appearance id.
+   ========================================================================== */
+
+:root,
+:root[data-hr-appearance='cockpit'],
+:root[data-hr-theme='cockpit'] {
+  color-scheme: dark;
+
+  --hr-bg: #06080d;
+  --hr-bg-raised: #0a0f18;
+  --hr-surface-1: rgba(148, 178, 214, 0.055);
+  --hr-surface-2: rgba(148, 178, 214, 0.095);
+  --hr-surface-3: rgba(148, 178, 214, 0.15);
+  --hr-panel: rgba(10, 15, 23, 0.92);
+  --hr-control: rgba(148, 178, 214, 0.075);
+  --hr-control-hover: rgba(148, 178, 214, 0.12);
+  --hr-control-active: rgba(148, 178, 214, 0.18);
+  --hr-overlay: rgba(2, 5, 10, 0.76);
+  --hr-code-bg: rgba(3, 6, 11, 0.72);
+
+  --hr-border: rgba(148, 178, 214, 0.1);
+  --hr-border-strong: rgba(148, 178, 214, 0.2);
+
+  --hr-text-1: rgba(237, 244, 252, 0.96);
+  --hr-text-2: rgba(222, 233, 246, 0.72);
+  --hr-text-3: rgba(213, 226, 241, 0.56);
+  --hr-text-4: rgba(206, 221, 238, 0.38);
+  --hr-on-strong: #ffffff;
+
+  --hr-accent: #4fd8e8;
+  --hr-accent-hover: #7de5ef;
+  --hr-accent-soft: rgba(79, 216, 232, 0.12);
+  --hr-accent-border: rgba(79, 216, 232, 0.3);
+  --hr-on-accent: #04222a;
+
+  --hr-speaking: #a5b4fc;
+  --hr-speaking-soft: rgba(129, 140, 248, 0.12);
+  --hr-speaking-border: rgba(129, 140, 248, 0.32);
+  --hr-success: #5ee2ad;
+  --hr-success-soft: rgba(52, 211, 153, 0.12);
+  --hr-success-border: rgba(52, 211, 153, 0.32);
+  --hr-warning: #fbc94b;
+  --hr-warning-soft: rgba(251, 191, 36, 0.12);
+  --hr-warning-border: rgba(251, 191, 36, 0.34);
+  --hr-danger: #fca5a5;
+  --hr-danger-soft: rgba(248, 113, 113, 0.12);
+  --hr-danger-border: rgba(248, 113, 113, 0.34);
+  --hr-info: #93c5fd;
+  --hr-info-soft: rgba(124, 179, 255, 0.12);
+  --hr-info-border: rgba(124, 179, 255, 0.3);
+
+  --hr-focus-ring: rgba(79, 216, 232, 0.32);
+  --hr-selection: rgba(79, 216, 232, 0.24);
+  --hr-scrollbar-track: #0a0f18;
+  --hr-scrollbar: #2a3541;
+  --hr-scrollbar-hover: #435565;
+  --hr-ambient-accent: color-mix(in srgb, var(--hr-accent) 18%, transparent);
+  --hr-ambient-info: color-mix(in srgb, var(--hr-accent) 12%, transparent);
+  --hr-canvas-ambient-primary: color-mix(in srgb, var(--hr-accent) 12%, transparent);
+  --hr-canvas-ambient-secondary: color-mix(in srgb, var(--hr-success) 8%, transparent);
+  --hr-decorative-accent-soft: var(--hr-accent-soft);
+  --hr-decorative-accent-border: var(--hr-accent-border);
+  --hr-decorative-speaking-soft: var(--hr-speaking-soft);
+  --hr-decorative-speaking-border: var(--hr-speaking-border);
+  --hr-settings-sidebar: var(--hr-surface-1);
+  --hr-settings-card: var(--hr-surface-1);
+  --hr-settings-card-hover: var(--hr-surface-2);
+  --hr-settings-divider: var(--hr-border);
+  --hr-settings-active: var(--hr-accent-soft);
+  --hr-settings-active-border: var(--hr-accent-border);
+
+  --hr-radius-lg: 16px;
+  --hr-radius-md: 12px;
+  --hr-radius-sm: 9px;
+
+  --hr-shadow-panel: 0 24px 70px rgba(0, 0, 0, 0.32);
+  --hr-shadow-floating: 0 28px 90px rgba(0, 0, 0, 0.56);
+  --hr-shadow-accent: 0 0 28px color-mix(in srgb, var(--hr-accent) 16%, transparent);
+}
+
+:root[data-hr-appearance='paper'],
+:root[data-hr-theme='paper'] {
+  color-scheme: light;
+
+  --hr-bg: #e9edef;
+  --hr-bg-raised: #eef1f2;
+  --hr-surface-1: #f4f5f5;
+  --hr-surface-2: #eaedef;
+  --hr-surface-3: #dde3e6;
+  --hr-panel: #f7f8f7;
+  --hr-control: #eceff0;
+  --hr-control-hover: #e3e8ea;
+  --hr-control-active: #dbe2e5;
+  --hr-overlay: rgba(38, 50, 58, 0.28);
+  --hr-code-bg: #e5e9eb;
+
+  --hr-border: #cbd3d8;
+  --hr-border-strong: #aebbc3;
+
+  --hr-text-1: #26323a;
+  --hr-text-2: #46545e;
+  --hr-text-3: #65737d;
+  --hr-text-4: #89949c;
+  --hr-on-strong: #f7fbfb;
+
+  --hr-accent: #2e727a;
+  --hr-accent-hover: #245f66;
+  --hr-accent-soft: #dbe9ea;
+  --hr-accent-border: #a9c9cd;
+  --hr-on-accent: #f7fbfb;
+
+  --hr-speaking: #656b9d;
+  --hr-speaking-soft: #e3e4ee;
+  --hr-speaking-border: #c1c3d6;
+  --hr-success: #3e755f;
+  --hr-success-soft: #deebe5;
+  --hr-success-border: #acd0c1;
+  --hr-warning: #876825;
+  --hr-warning-soft: #f0e8d5;
+  --hr-warning-border: #dac897;
+  --hr-danger: #a15258;
+  --hr-danger-soft: #f0e0e1;
+  --hr-danger-border: #dcb7ba;
+  --hr-info: #456f98;
+  --hr-info-soft: #e0e8ef;
+  --hr-info-border: #b6cadc;
+
+  --hr-focus-ring: rgba(46, 114, 122, 0.25);
+  --hr-selection: rgba(46, 114, 122, 0.18);
+  --hr-scrollbar-track: #eef1f2;
+  --hr-scrollbar: #c0c8cb;
+  --hr-scrollbar-hover: #8e9ca1;
+  --hr-ambient-accent: rgba(46, 114, 122, 0.028);
+  --hr-ambient-info: rgba(69, 111, 152, 0.02);
+  --hr-canvas-ambient-primary: rgba(46, 114, 122, 0.02);
+  --hr-canvas-ambient-secondary: rgba(62, 117, 95, 0.014);
+  --hr-decorative-accent-soft: #eef3f3;
+  --hr-decorative-accent-border: var(--hr-border);
+  --hr-decorative-speaking-soft: #f0f0f4;
+  --hr-decorative-speaking-border: var(--hr-border);
+  --hr-settings-sidebar: #e4e9eb;
+  --hr-settings-card: #f1f3f3;
+  --hr-settings-card-hover: #e7ebed;
+  --hr-settings-divider: #bcc7cd;
+  --hr-settings-active: #d7e6e8;
+  --hr-settings-active-border: #8db7bc;
+
+  --hr-radius-lg: 14px;
+  --hr-radius-md: 10px;
+  --hr-radius-sm: 8px;
+
+  --hr-shadow-panel: 0 1px 2px rgba(37, 50, 58, 0.04), 0 12px 34px rgba(37, 50, 58, 0.07);
+  --hr-shadow-floating: 0 20px 54px rgba(37, 50, 58, 0.14), 0 2px 8px rgba(37, 50, 58, 0.06);
+  --hr-shadow-accent: 0 8px 22px rgba(37, 50, 58, 0.08);
+}
+
+::selection {
+  background: var(--hr-selection);
+  color: var(--hr-text-1);
+}

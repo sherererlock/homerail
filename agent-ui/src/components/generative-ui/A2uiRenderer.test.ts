@@ -149,8 +149,8 @@ describe('A2uiRenderer', () => {
     expect([...mounted.querySelectorAll<HTMLElement>('.hr-a2ui__bar-chart > div')].map(item => item.dataset.tone)).toEqual([
       'info', 'positive', 'warning', 'critical',
     ])
-    expect(rendererSource).toContain(".homerail-a2ui [data-tone='info'] { --tone: #59b8ff; }")
-    expect(rendererSource).toContain(".homerail-a2ui [data-tone='positive'] { --tone: #45d58a; }")
+    expect(rendererSource).toContain(".homerail-a2ui [data-tone='info'] { --tone: var(--hr-info); }")
+    expect(rendererSource).toContain(".homerail-a2ui [data-tone='positive'] { --tone: var(--hr-success); }")
   })
 
   it('renders camelCase Metric, Table, DAG, and passive Artifact components', async () => {
@@ -218,14 +218,32 @@ describe('A2uiRenderer', () => {
     expect(frame.getAttribute('referrerpolicy')).toBe('no-referrer')
     expect(frame.getAttribute('allow')).toBe('')
     expect(frame.getAttribute('src')).toContain('/artifacts/by-id/story/preview?revision=2')
+    expect(frame.hasAttribute('data-homerail-artifact-frame')).toBe(true)
+    expect(frame.parentElement?.querySelector(':scope > button')).toBeNull()
+    expect(frame.parentElement?.querySelector(':scope > p')).toBeNull()
 
     mounted.querySelector<HTMLButtonElement>('button.hr-a2ui__artifact')?.click()
-    mounted.querySelector<HTMLButtonElement>('div.hr-a2ui__artifact > button')?.click()
     await nextTick()
     expect(requestedPreviews).toEqual([
       expect.objectContaining({ title: 'AI cover', kind: 'image', layout: 'portrait' }),
-      expect.objectContaining({ title: 'Story page', kind: 'html', layout: 'fluid' }),
     ])
+  })
+
+  it('lets a root HTML Artifact inherit the full canvas height', () => {
+    const mounted = mount(surface([
+      {
+        id: 'root', component: 'HrArtifact', kind: 'html',
+        uri: '/api/voice-agent/sessions/session-one/artifacts/by-id/showcase/preview',
+        title: 'Showcase', description: 'Three by two overview',
+      },
+    ]))
+
+    const artifact = mounted.querySelector('.homerail-a2ui > div.hr-a2ui__artifact')
+    expect(artifact?.querySelector('iframe')).toBeTruthy()
+    expect(artifact?.children).toHaveLength(1)
+    expect(rendererSource).toContain('height: 100%;')
+    expect(rendererSource).toContain('.homerail-a2ui > div.hr-a2ui__artifact { height: 100%; }')
+    expect(rendererSource).toContain('.homerail-a2ui > div.hr-a2ui__artifact > iframe { pointer-events: auto; }')
   })
 
   it('renders passive Actor media, metrics, comparisons, timelines, and routes without active controls', () => {
